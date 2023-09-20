@@ -44,7 +44,6 @@ Matrix bot for a social credit system
     </li>
     <li><a href="#license">License</a></li>
     <li><a href="#contact">Contact</a></li>
-    <li><a href="#">Contact</a></li>
   </ol>
 </details>
 
