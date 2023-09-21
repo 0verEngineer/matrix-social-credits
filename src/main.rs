@@ -1,7 +1,9 @@
-mod event_handlers;
+mod event_handler;
 mod data;
 mod utils;
 
+use std::env;
+use std::ops::Deref;
 use matrix_sdk::{
     Client, config::SyncSettings,
     ruma::{user_id},
@@ -9,15 +11,22 @@ use matrix_sdk::{
 use matrix_sdk::room::Room;
 use matrix_sdk::ruma::events::AnySyncMessageLikeEvent;
 use std::sync::{Arc, Mutex};
+use matrix_sdk::ruma::UserId;
 use rusqlite::{Connection};
 use crate::data::create_db_tables;
-use crate::event_handlers::{on_message_like_event, on_stripped_state_member};
+use crate::event_handler::EventHandler;
+use crate::utils::autojoin::on_stripped_state_member;
 
 
-// todo implement per command (e.g. !social_credit @user +1)
-// todo implement per message answer/reaction
-// todo implement register-emoji and timeout in 5 mins
-// todo implement config file where the initial admin user can be set, check the db on every start and set this user to admin
+// todo admin user commands: !add_admin, !add_moderator, !remove_moderator, !register_emoji
+//  - register-emoji, send emoji and -10 for example
+// todo implement per reaction social credit change
+// todo implement env var for the initial admin user
+// todo implement list command
+// todo session preservation and emoji verification
+// todo limit unwrap usage
+// todo event db table cleanup after a configurable amount of days
+
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -25,23 +34,38 @@ async fn main() -> anyhow::Result<()> {
 
     create_db_tables(&conn);
 
-    let shared_conn = Arc::new(Mutex::new(conn));
-    let user = user_id!("@social-credit-system:matrix.hackinger.io");
-    let client = Client::builder().user_id(user).build().await?;
+    let username = env::var("MATRIX_USERNAME").expect("MATRIX_USERNAME not set");
+    let homeserver_url = env::var("MATRIX_HOMESERVER_URL").expect("MATRIX_HOMESERVER_URL not set");
+    let homeserver_url_relative : &str;
+    if homeserver_url.starts_with("https://") {
+        homeserver_url_relative = homeserver_url.strip_prefix("https://").expect("Failed to strip https:// from homeserver url");
+    }
+    else if homeserver_url.starts_with("http://") {
+        homeserver_url_relative = homeserver_url.strip_prefix("http://").expect("Failed to strip http:// from homeserver url");
+    }
+    else {
+        panic!("Invalid homeserver url");
+    }
+    let password = env::var("MATRIX_PASSWORD").expect("MATRIX_PASSWORD not set");
 
-    client.login_username(user, "Bxxsf2CbkfZH6Gasdf1").send().await?;
-
+    let client = Client::builder().homeserver_url(homeserver_url).build().await?;
+    client.login_username(username.as_str(), &*password).initial_device_display_name("Social Credit System").send().await?;
     client.add_event_handler(on_stripped_state_member);
+
+    let shared_conn = Arc::new(Mutex::new(conn));
+    let event_handler = Arc::new(EventHandler::new(shared_conn.clone(), client.clone()));
+
     client.add_event_handler({
-        let conn = shared_conn.clone();
+        let event_handler = event_handler.clone();
         move |event: AnySyncMessageLikeEvent, room: Room| {
-            let conn = conn.clone();
+            let handler = event_handler.clone();
             async move {
-                on_message_like_event(conn, event, room).await;
+                handler.on_message_like_event(event, room).await;
             }
         }
     });
 
-    client.sync(SyncSettings::default()).await;
+    client.sync(SyncSettings::default()).await.expect("Sync loop fail");
+
     Ok(())
 }
