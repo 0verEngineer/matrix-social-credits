@@ -157,7 +157,8 @@ fn do_get_user_sql_inner<P: Params>(params: P, stmt: &mut Statement, with_social
             url: row.get(2)?,
             user_type: match row.get::<_, i32>(3)? {
                 0 => UserType::Default,
-                1 => UserType::Admin,
+                1 => UserType::Moderator,
+                2 => UserType::Admin,
                 _ => UserType::Default,
             },
             social_credit: match with_social_credit {

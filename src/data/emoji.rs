@@ -16,6 +16,38 @@ pub fn create_table_emoji(conn: &Connection) {
     )", []).expect("Failed to create emoji table");
 }
 
+pub fn insert_emoji(conn: &Arc<Mutex<Connection>>, emoji: &Emoji) -> Result<(), Error> {
+    let sql = "INSERT INTO emoji (emoji, social_credit) VALUES (?1, ?2)";
+    let connection = conn.lock().unwrap();
+
+    connection.execute(
+        sql,
+        &[
+            &emoji.emoji as &dyn rusqlite::ToSql,
+            &emoji.social_credit as &dyn rusqlite::ToSql,
+        ]
+    )?;
+
+    Ok(())
+}
+
+pub fn find_emoji_in_db(conn: &Arc<Mutex<Connection>>, emoji: &String) -> Option<Emoji> {
+    let sql = "SELECT * FROM emoji WHERE emoji = :emoji";
+    let params = params![emoji];
+    match do_get_emoji_sql(conn, sql, params) {
+        Ok(mut emoji) => {
+            if emoji.len() == 1 {
+                return Some(emoji.remove(0));
+            }
+            None
+        },
+        Err(e) => {
+            println!("Database error: {}", e);
+            None
+        },
+    }
+}
+
 pub fn find_all_emoji_in_db(conn: &Arc<Mutex<Connection>>) -> Option<Vec<Emoji>> {
     let sql = "SELECT * FROM emoji";
     let params = params![];

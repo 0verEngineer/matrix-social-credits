@@ -1,11 +1,11 @@
 use std::sync::{Arc, Mutex};
 use matrix_sdk::Client;
-use matrix_sdk::room::Room;
+use matrix_sdk::room::{Joined, Room};
 use matrix_sdk::ruma::events;
 use matrix_sdk::ruma::events::AnySyncMessageLikeEvent;
 use matrix_sdk::ruma::events::room::message::{MessageType, RoomMessageEventContent};
 use rusqlite::Connection;
-use crate::data::emoji::{Emoji, find_all_emoji_in_db};
+use crate::data::emoji::{Emoji, find_all_emoji_in_db, find_emoji_in_db, insert_emoji};
 use crate::data::event::{Event, find_event_in_db, insert_event};
 use crate::data::user::{find_all_users_in_db, User, UserType};
 use crate::utils::user_util::{get_user_list_answer, setup_user};
@@ -116,11 +116,13 @@ impl EventHandler {
 
                             // commands
 
-                            if body == "!list" {
-                                let answer = get_user_list_answer(&self.conn, &room);
-                                let content = RoomMessageEventContent::text_html(answer.text, answer.html);
-                                room.send(content, None).await.unwrap();
+                            let mut stripped_body: String = body.to_string();
+                            if body.starts_with("* ") {
+                                stripped_body = body.strip_prefix("* ").unwrap().to_string();
                             }
+
+                            if self.handle_list(&room, &mut stripped_body).await { return; };
+                            if self.handle_register_emoji(room, &mut sender, &mut stripped_body).await { return; }
 
                             // reactions
 
@@ -141,6 +143,72 @@ impl EventHandler {
         }
     }
 
+    async fn handle_list(&self, room: &Joined, stripped_body: &mut String) -> bool {
+        if stripped_body == "!list" {
+            let answer = get_user_list_answer(&self.conn, &room);
+            let content = RoomMessageEventContent::text_html(answer.text, answer.html);
+            room.send(content, None).await.unwrap();
+            true;
+        }
+        false
+    }
+
+    async fn handle_register_emoji(&self, room: Joined, sender: &mut Option<User>, body: &mut String) -> bool {
+        if body.starts_with("!register_emoji") || body.starts_with("!register-emoji") {
+            match sender.clone().unwrap().user_type {
+                UserType::Admin => {},
+                _ => {
+                    room.send(RoomMessageEventContent::text_plain("You are not allowed to use this command"), None).await.unwrap();
+                    return true;
+                }
+            }
+
+            let error_message = "Invalid command usage! Example: !register-emoji 😑 -25";
+            let mut text_opt = body.strip_prefix("!register_emoji");
+            if text_opt.is_none() {
+                text_opt = body.strip_prefix("!register-emoji");
+                if text_opt.is_none() {
+                    room.send(RoomMessageEventContent::text_plain(error_message), None).await.unwrap();
+                    return true;
+                }
+            }
+            let mut parts = text_opt.unwrap().split(" ").collect::<Vec<&str>>();
+            if parts.len() == 3 && parts[0] == "" {
+                parts.remove(0);
+            }
+
+            if parts.len() != 2 {
+                room.send(RoomMessageEventContent::text_plain(error_message), None).await.unwrap();
+                return true;
+            }
+
+            let emoji = parts[0];
+            let social_credit_opt = parts[1].parse::<i32>();
+            if social_credit_opt.is_err() || emoji.len() == 0 || emoji == " " {
+                room.send(RoomMessageEventContent::text_plain(error_message), None).await.unwrap();
+                return true;
+            }
+            let social_credit = social_credit_opt.unwrap();
+
+            if self.find_emoji_in_cache(emoji).is_some() || find_emoji_in_db(&self.conn, &emoji.to_string()).is_some() {
+                room.send(RoomMessageEventContent::text_plain("Emoji already registered"), None).await.unwrap();
+                return true;
+            }
+
+            let emoji = Emoji {
+                id: -1,
+                emoji: emoji.to_string(),
+                social_credit,
+            };
+
+            insert_emoji(&self.conn, &emoji).unwrap();
+            self.cached_emojis.lock().unwrap().push(emoji.clone());
+            room.send(RoomMessageEventContent::text_plain(format!("Emoji registered: {} with social credit score: {}", emoji.emoji, emoji.social_credit)), None).await.unwrap();
+            true;
+        }
+        false
+    }
+
     fn find_user_in_cache(&self, name: &str) -> Option<User> {
         let users_guard = self.cached_users.lock().unwrap();
         for user in users_guard.iter() {
@@ -151,10 +219,10 @@ impl EventHandler {
         None
     }
 
-    fn find_emoji_in_cache(&self, name: &str) -> Option<Emoji> {
+    fn find_emoji_in_cache(&self, emoji_text: &str) -> Option<Emoji> {
         let emojis_guard = self.cached_emojis.lock().unwrap();
         for emoji in emojis_guard.iter() {
-            if emoji.emoji == name {
+            if emoji.emoji == emoji_text {
                 return Some(emoji.clone());
             }
         }

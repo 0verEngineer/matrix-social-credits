@@ -19,14 +19,16 @@ use crate::utils::autojoin::on_stripped_state_member;
 use crate::utils::user_util::{initial_admin_user_setup};
 
 
-// todo admin user commands: !add_admin, !add_moderator, !remove_moderator, !register_emoji
-//  - register-emoji, send emoji and -10 for example
+// todo admin user commands: !add_admin, !add_moderator, !remove_moderator
+// todo !help command
 // todo implement per reaction social credit change
 // todo session preservation and emoji verification
 // todo limit unwrap usage
 // todo event db table cleanup after a configurable amount of days
 // todo initial social_credit score per env variable
 // todo moderator needs to be room specific
+// todo user answers instead of standalone messages when the bot answers something
+// todo emojis need to be room specific
 
 
 #[tokio::main]
