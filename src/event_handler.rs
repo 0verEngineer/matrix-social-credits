@@ -5,8 +5,10 @@ use matrix_sdk::ruma::events;
 use matrix_sdk::ruma::events::AnySyncMessageLikeEvent;
 use matrix_sdk::ruma::events::room::message::{MessageType, RoomMessageEventContent};
 use rusqlite::Connection;
-use crate::data::{Emoji, Event, find_all_emoji_in_db, find_all_users_in_db, find_event_in_db, insert_event, User, UserType};
-use crate::utils::user_util::{construct_and_register_user};
+use crate::data::emoji::{Emoji, find_all_emoji_in_db};
+use crate::data::event::{Event, find_event_in_db, insert_event};
+use crate::data::user::{find_all_users_in_db, User, UserType};
+use crate::utils::user_util::{get_user_list_answer, setup_user};
 
 
 pub struct EventHandler {
@@ -52,7 +54,7 @@ impl EventHandler {
 
                 let mut sender = self.find_user_in_cache(&event.sender().to_string());
                 if sender.is_none() {
-                    sender = construct_and_register_user(&self.conn, &event.sender().to_string(), UserType::Default);
+                    sender = setup_user(&self.conn, Some(room.clone()), &event.sender().to_string(), UserType::Default);
                     if sender.is_none() {
                         println!("Sender is none"); // todo debug level
                         return;
@@ -72,12 +74,7 @@ impl EventHandler {
                 }*/
 
                 if event.event_type().to_string() == "m.reaction" {
-                    // todo
-                    println!("Received a reaction event {:?}", event);
                     match event.original_content().unwrap() {
-                        // todo we are missing the recipient here but the event has a relation to the initial message event, so we have 2 options:
-                        //  1. we can fetch the initial message event from the server somehow
-                        //  2. we cache the events
                         events::AnyMessageLikeEventContent::Reaction(content) => {
                             println!("Reaction content {:?}", content);
                             let emoji = self.find_emoji_in_cache(&content.relates_to.key);
@@ -109,7 +106,7 @@ impl EventHandler {
 
                             let mut recipient = self.find_user_in_cache(&body.to_string());
                             if recipient.is_none() {
-                                recipient = construct_and_register_user(&self.conn, &body.to_string(), UserType::Default);
+                                recipient = setup_user(&self.conn, Some(room.clone()), &body.to_string(), UserType::Default);
                                 if recipient.is_some() {
                                     // Add recipient to user cache
                                     let mut users_guard = self.cached_users.lock().unwrap();
@@ -119,9 +116,9 @@ impl EventHandler {
 
                             // commands
 
-                            if body == "!party" {
-                                println!("Party time!");
-                                let content = RoomMessageEventContent::text_plain("🎉🎊🥳 let's PARTY!! 🥳🎊🎉");
+                            if body == "!list" {
+                                let answer = get_user_list_answer(&self.conn, &room);
+                                let content = RoomMessageEventContent::text_html(answer.text, answer.html);
                                 room.send(content, None).await.unwrap();
                             }
 

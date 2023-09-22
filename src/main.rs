@@ -10,7 +10,10 @@ use matrix_sdk::room::Room;
 use matrix_sdk::ruma::events::AnySyncMessageLikeEvent;
 use std::sync::{Arc, Mutex};
 use rusqlite::{Connection};
-use crate::data::{create_db_tables};
+use crate::data::emoji::create_table_emoji;
+use crate::data::event::create_table_event;
+use crate::data::user::create_table_user;
+use crate::data::user_social_credit::create_table_user_social_credit;
 use crate::event_handler::EventHandler;
 use crate::utils::autojoin::on_stripped_state_member;
 use crate::utils::user_util::{initial_admin_user_setup};
@@ -19,10 +22,11 @@ use crate::utils::user_util::{initial_admin_user_setup};
 // todo admin user commands: !add_admin, !add_moderator, !remove_moderator, !register_emoji
 //  - register-emoji, send emoji and -10 for example
 // todo implement per reaction social credit change
-// todo implement list command
 // todo session preservation and emoji verification
 // todo limit unwrap usage
 // todo event db table cleanup after a configurable amount of days
+// todo initial social_credit score per env variable
+// todo moderator needs to be room specific
 
 
 #[tokio::main]
@@ -44,7 +48,10 @@ async fn main() -> anyhow::Result<()> {
     }
     let password = env::var("MATRIX_PASSWORD").expect("MATRIX_PASSWORD not set");
 
-    create_db_tables(&conn);
+    create_table_user(&conn);
+    create_table_user_social_credit(&conn);
+    create_table_emoji(&conn);
+    create_table_event(&conn);
 
     let client = Client::builder().homeserver_url(homeserver_url.clone()).build().await?;
     client.login_username(username.as_str(), &*password).initial_device_display_name("Social Credit System").send().await?;
