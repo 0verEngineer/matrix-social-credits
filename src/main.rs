@@ -3,25 +3,22 @@ mod data;
 mod utils;
 
 use std::env;
-use std::ops::Deref;
 use matrix_sdk::{
     Client, config::SyncSettings,
-    ruma::{user_id},
 };
 use matrix_sdk::room::Room;
 use matrix_sdk::ruma::events::AnySyncMessageLikeEvent;
 use std::sync::{Arc, Mutex};
-use matrix_sdk::ruma::UserId;
 use rusqlite::{Connection};
-use crate::data::create_db_tables;
+use crate::data::{create_db_tables};
 use crate::event_handler::EventHandler;
 use crate::utils::autojoin::on_stripped_state_member;
+use crate::utils::user_util::{initial_admin_user_setup};
 
 
 // todo admin user commands: !add_admin, !add_moderator, !remove_moderator, !register_emoji
 //  - register-emoji, send emoji and -10 for example
 // todo implement per reaction social credit change
-// todo implement env var for the initial admin user
 // todo implement list command
 // todo session preservation and emoji verification
 // todo limit unwrap usage
@@ -32,8 +29,7 @@ use crate::utils::autojoin::on_stripped_state_member;
 async fn main() -> anyhow::Result<()> {
     let conn = Connection::open("social_credit.db")?;
 
-    create_db_tables(&conn);
-
+    let admin_username = env::var("MATRIX_ADMIN_USERNAME").expect("MATRIX_ADMIN_USERNAME not set");
     let username = env::var("MATRIX_USERNAME").expect("MATRIX_USERNAME not set");
     let homeserver_url = env::var("MATRIX_HOMESERVER_URL").expect("MATRIX_HOMESERVER_URL not set");
     let homeserver_url_relative : &str;
@@ -48,12 +44,16 @@ async fn main() -> anyhow::Result<()> {
     }
     let password = env::var("MATRIX_PASSWORD").expect("MATRIX_PASSWORD not set");
 
-    let client = Client::builder().homeserver_url(homeserver_url).build().await?;
+    create_db_tables(&conn);
+
+    let client = Client::builder().homeserver_url(homeserver_url.clone()).build().await?;
     client.login_username(username.as_str(), &*password).initial_device_display_name("Social Credit System").send().await?;
     client.add_event_handler(on_stripped_state_member);
 
     let shared_conn = Arc::new(Mutex::new(conn));
     let event_handler = Arc::new(EventHandler::new(shared_conn.clone(), client.clone()));
+
+    initial_admin_user_setup(&shared_conn, &admin_username, &homeserver_url_relative);
 
     client.add_event_handler({
         let event_handler = event_handler.clone();

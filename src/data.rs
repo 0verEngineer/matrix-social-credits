@@ -55,13 +55,7 @@ pub fn create_db_tables(conn: &Connection) {
 
 pub fn insert_user(conn: &Arc<Mutex<Connection>>, user: &User) -> Result<(), Error> {
     let sql = "INSERT INTO user (name, url, social_credit, user_type) VALUES (?1, ?2, ?3, ?4)";
-
-    let user_type_as_int = match user.user_type {
-        UserType::Default => 0,
-        UserType::Moderator => 1,
-        UserType::Admin => 2,
-    };
-
+    let user_type_as_int = get_user_type_as_int(user);
     let connection = conn.lock().unwrap();
 
     connection.execute(
@@ -75,6 +69,32 @@ pub fn insert_user(conn: &Arc<Mutex<Connection>>, user: &User) -> Result<(), Err
     )?;
 
     Ok(())
+}
+
+pub fn update_user(conn: &Arc<Mutex<Connection>>, user: &User) -> Result<(), Error> {
+    let sql = "UPDATE user SET social_credit=?1, user_type=?2 WHERE id=?3";
+    let connection = conn.lock().unwrap();
+    let user_type_as_int = get_user_type_as_int(user);
+
+    connection.execute(
+        sql,
+        &[
+            &user.social_credit as &dyn ToSql,
+            &user_type_as_int as &dyn ToSql,
+            &user.id as &dyn ToSql,
+        ]
+    )?;
+
+    Ok(())
+}
+
+fn get_user_type_as_int(user: &User) -> i32 {
+    let user_type_as_int = match user.user_type {
+        UserType::Default => 0,
+        UserType::Moderator => 1,
+        UserType::Admin => 2,
+    };
+    user_type_as_int
 }
 
 pub fn find_user_in_db(
