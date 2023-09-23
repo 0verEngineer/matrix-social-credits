@@ -20,7 +20,6 @@ use crate::utils::user_util::{initial_admin_user_setup};
 
 
 // todo admin user commands: !add_admin, !add_moderator, !remove_moderator
-// todo !help command
 // todo implement per reaction social credit change
 // todo session preservation and emoji verification
 // todo limit unwrap usage

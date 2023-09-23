@@ -122,6 +122,7 @@ impl EventHandler {
                                 stripped_body = body.strip_prefix("* ").unwrap().to_string();
                             }
 
+                            if self.handle_help(&room, &mut stripped_body).await { return; };
                             if self.handle_list(&room, &mut stripped_body).await { return; };
                             if self.handle_list_emojis(&room, &mut stripped_body).await { return; };
                             if self.handle_register_emoji(room, &mut sender, &mut stripped_body).await { return; }
@@ -159,6 +160,20 @@ impl EventHandler {
         if stripped_body == "!list_emoji" || stripped_body == "!list-emoji" || stripped_body == "!list_emojis" || stripped_body == "!list-emojis" {
             let answer = get_emoji_list_answer(&self.conn, &room);
             let content = RoomMessageEventContent::text_html(answer.text, answer.html);
+            room.send(content, None).await.unwrap();
+            true;
+        }
+        false
+    }
+
+    async fn handle_help(&self, room: &Joined, stripped_body: &mut String) -> bool {
+        if stripped_body == "!help" {
+            let help_body = "<h3>Commands:</h3>
+                - <b>!list</b>: List all users and their social credit score for the current room<br>
+                - <b>!list_emoji</b>: List all registered emojis and their social credit score for the current room<br>
+                - <b>!register_emoji</b> <emoji> <social_credit>: Register an emoji with a social credit score for the current room. Example: !register_emoji 😑 -25
+            ".to_string();
+            let content = RoomMessageEventContent::text_html(help_body.clone(), help_body);
             room.send(content, None).await.unwrap();
             true;
         }
