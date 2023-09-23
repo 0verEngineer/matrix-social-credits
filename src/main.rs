@@ -19,12 +19,10 @@ use crate::utils::autojoin::on_stripped_state_member;
 use crate::utils::user_util::{initial_admin_user_setup};
 
 
+// todo user needs a timestamp per room to prevent spamming, env variable for timespan + env variable for how often it is possible in the timespan refactor user_social_credit to user_room_data
+
 // todo session preservation and emoji verification
-// todo limit unwrap usage
-// todo initial social_credit score per env variable
 // todo logging + log levels + file logging
-// todo user needs a timestamp per room to prevent spamming, env variable for cooldown, refactor user_social_credit to user_room_data
-// todo prevent user from changing their own social_credit score
 // todo test setup in empty room with only admin user, no messages
 //  -> query all room users on initial setup and create user_social_credit for every user, also handle user joining
 

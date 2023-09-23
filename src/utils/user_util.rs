@@ -5,6 +5,10 @@ use rusqlite::Connection;
 use crate::data::user::{find_all_users_with_social_credit_for_room_in_db, find_user_in_db, insert_user, update_user, User, HtmlAndTextAnswer, UserType};
 use crate::data::user_social_credit::{find_user_social_credit_by_user_id_and_room_id, insert_user_social_credit, UserSocialCredit};
 
+pub fn compare_user(user1: &User, user2: &User) -> bool {
+    user1.name == user2.name && user1.url == user2.url
+}
+
 pub fn extract_userdata_from_string(body: &str) -> Option<(String, String)> {
     let re = Regex::new(r#"@(?P<username>[^:]+):(?P<domain>[^">]+)"#).unwrap();
 

@@ -10,7 +10,7 @@ use crate::data::event::{Event, find_event_in_db, insert_event};
 use crate::data::user::{update_user, User, UserType};
 use crate::data::user_social_credit::update_user_social_credit;
 use crate::utils::emoji_util::get_emoji_list_answer;
-use crate::utils::user_util::{extract_userdata_from_string, get_user_list_answer, setup_user};
+use crate::utils::user_util::{compare_user, extract_userdata_from_string, get_user_list_answer, setup_user};
 
 
 pub struct EventHandler {
@@ -72,7 +72,7 @@ impl EventHandler {
 
                 if event.event_type().to_string() == "m.reaction" {
                     if event.original_content().is_none() {
-                        println!("Recieved a m.reaction event without original_content. event: {:?}", event); // debug level
+                        println!("Received a m.reaction event without original_content. Event: {:?}", event); // debug level
                         return;
                     }
 
@@ -84,26 +84,31 @@ impl EventHandler {
                                 println!("Emoji {} is not registered", content.relates_to.key); // debug level
                                 return;
                             }
+                            let emoji = emoji.unwrap();
 
-                            // todo unwrap usage
                             let relation = &event.original_content().unwrap().relation();
                             if relation.is_none() {
                                 println!("Relation is none");
                                 return;
                             }
 
-                            // todo unwrap usage
                             match relation.clone().unwrap().clone() {
                                 Relation::Annotation(annotation) => {
-                                    println!("Event id {:?}", annotation.event_id);
                                     let message_event = room.event(&*annotation.event_id).await;
                                     if message_event.is_err() {
-                                        println!("Unable to get the message event that relates to this reaction event");
+                                        println!("Unable to get the message event that relates to this reaction event"); // error level
                                         return;
                                     }
 
                                     let message_event = message_event.unwrap().event;
-                                    match message_event.deserialize().unwrap() { // todo unwrap usage
+                                    let deserialized_event = match message_event.deserialize() {
+                                        Ok(event) => event,
+                                        Err(e) => {
+                                            println!("Unable to deserialize message event: {}", e); // error level
+                                            return;
+                                        }
+                                    };
+                                    match deserialized_event {
                                         AnyTimelineEvent::MessageLike(message_like_event) => {
                                             println!("Message like event {:?}", message_like_event);
                                             println!("Sender: {}", message_like_event.sender().to_string());
@@ -122,16 +127,27 @@ impl EventHandler {
                                                 return;
                                             }
 
+                                            let sender_clone = sender.clone();
+                                            if sender_clone.is_none() {
+                                                println!("Sender of reaction is none"); // debug level
+                                                return;
+                                            }
+
+                                            if compare_user(&recipient, &sender_clone.unwrap()) {
+                                                println!("Sender and recipient of reaction are the same user"); // debug level
+                                                return;
+                                            }
+
                                             if recipient.social_credit.is_none() {
                                                 println!("Recipient of reaction does not have a social credit score"); // error level
                                                 return;
                                             }
 
                                             let mut recipient_social_credit = recipient.social_credit.unwrap();
-                                            recipient_social_credit.social_credit += emoji.clone().unwrap().social_credit;
+                                            recipient_social_credit.social_credit += emoji.social_credit;
                                             recipient.social_credit = Some(recipient_social_credit);
                                             self.update_user_in_db(&recipient);
-                                            let text = format!("<b>{}'s</b> Social Credit Score: <b>{}</b>", recipient.name, recipient.social_credit.unwrap().social_credit);
+                                            let text = format!("<b>{}'s</b> new Social Credit Score: <b>{}</b>", recipient.name, recipient.social_credit.unwrap().social_credit);
                                             room.send(RoomMessageEventContent::text_html(
                                                 text.clone(),
                                                 text
@@ -148,6 +164,11 @@ impl EventHandler {
                 }
 
                 if event.event_type().to_string() == "m.room.message" {
+                    if event.original_content().is_none() {
+                        println!("Received a m.room.message event without original_content. Event: {:?}", event); // debug level
+                        return;
+                    }
+
                     match event.original_content().unwrap() {
                         events::AnyMessageLikeEventContent::RoomMessage(content) => {
                             match content.msgtype {
@@ -224,6 +245,10 @@ impl EventHandler {
 
     async fn handle_register_emoji(&self, room: Joined, sender: &mut Option<User>, body: &mut String) -> bool {
         if body.starts_with("!register_emoji") || body.starts_with("!register-emoji") {
+            if sender.is_none() {
+                println!("Sender is none"); // debug level
+                return true;
+            }
             match sender.clone().unwrap().user_type {
                 UserType::Admin => {},
                 _ => {
@@ -273,7 +298,10 @@ impl EventHandler {
                 social_credit,
             };
 
-            insert_emoji(&self.conn, &emoji).unwrap();
+            if insert_emoji(&self.conn, &emoji).is_err() {
+                println!("Unable to insert emoji into db"); // error level
+                return true;
+            }
             room.send(RoomMessageEventContent::text_plain(format!("Emoji registered: {} with social credit score: {}", emoji.emoji, emoji.social_credit)), None).await.unwrap();
             true;
         }
