@@ -18,7 +18,6 @@ pub struct EventHandler {
     conn: Arc<Mutex<Connection>>,
     client: Client,
     cached_emojis: Arc<Mutex<Vec<Emoji>>>,
-    cached_users: Arc<Mutex<Vec<User>>>,
     bot_username: String,
     homeserver_url: String,
     initial_social_credit: i32,
@@ -26,13 +25,11 @@ pub struct EventHandler {
 
 impl EventHandler {
     pub fn new(conn: Arc<Mutex<Connection>>, client: Client, bot_username: String, homeserver_url: String, initial_social_credit: i32) -> Self {
-        let users: Vec<User> = find_all_users_with_social_credit_in_db(&conn).unwrap_or(Vec::new());
         let emojis: Vec<Emoji> = find_all_emoji_in_db(&conn).unwrap_or(Vec::new());
         EventHandler {
             conn,
             client,
             cached_emojis: Arc::new(Mutex::new(emojis)),
-            cached_users: Arc::new(Mutex::new(users)),
             bot_username,
             homeserver_url,
             initial_social_credit,
@@ -64,16 +61,10 @@ impl EventHandler {
                 // Check if the sender is the bot itself
                 if self.handle_user_tag_is_the_bot(&event) { return; }
 
-                let mut sender = self.find_user_in_cache_by_tag(&event.sender().to_string());
+                let mut sender = setup_user(&self.conn, Some(room.clone()), &event.sender().to_string(), UserType::Default, self.initial_social_credit);
                 if sender.is_none() {
-                    sender = setup_user(&self.conn, Some(room.clone()), &event.sender().to_string(), UserType::Default, self.initial_social_credit);
-                    if sender.is_none() {
-                        println!("Sender is none"); // debug level
-                        return;
-                    }
-                    // Add sender to user cache
-                    let mut users_guard = self.cached_users.lock().unwrap();
-                    users_guard.push(sender.clone().unwrap());
+                    println!("Sender is none"); // debug level
+                    return;
                 }
 
                 // Matrix does not support stickers in tagged messages so we cannot use stickers at the moment
@@ -125,16 +116,11 @@ impl EventHandler {
 
                                             // The sender here is the user where the social credit score should be changed, so it is the recipient of the reaction
                                             let recipient_user_tag = message_like_event.sender().to_string();
-                                            let mut recipient_opt = self.find_user_in_cache_by_tag(&recipient_user_tag);
+                                            let recipient_opt = setup_user(&self.conn, Some(room.clone()), &recipient_user_tag, UserType::Default, self.initial_social_credit);
                                             if recipient_opt.is_none() {
-                                                recipient_opt = setup_user(&self.conn, Some(room.clone()), &recipient_user_tag, UserType::Default, self.initial_social_credit);
-                                                if recipient_opt.is_none() {
-                                                    println!("Recipient of reaction is none");
-                                                    return;
-                                                }
-                                                // We do not need to add the user to the cache here, the update_user_in_cache_and_db below does it
+                                                println!("Recipient of reaction is none");
+                                                return;
                                             }
-
                                             let mut recipient = recipient_opt.clone().unwrap();
 
                                             if self.is_user_the_bot(&recipient.name, &recipient.url) {
@@ -150,7 +136,7 @@ impl EventHandler {
                                             let mut recipient_social_credit = recipient.social_credit.unwrap();
                                             recipient_social_credit.social_credit += emoji.clone().unwrap().social_credit;
                                             recipient.social_credit = Some(recipient_social_credit);
-                                            self.update_user_in_cache_and_db(&recipient);
+                                            self.update_user_in_db(&recipient);
                                             let text = format!("<b>{}'s</b> Social Credit Score: <b>{}</b>", recipient.name, recipient.social_credit.unwrap().social_credit);
                                             room.send(RoomMessageEventContent::text_html(
                                                 text.clone(),
@@ -303,22 +289,7 @@ impl EventHandler {
 
     /// Update the user in the cache and the database, also updates the social credit score in the database
     /// if the user has a social credit score
-    fn update_user_in_cache_and_db(&self, user: &User) {
-        let mut found = false;
-        let mut users_guard = self.cached_users.lock().unwrap();
-        for cached_user in users_guard.iter_mut() {
-            if cached_user.id == user.id {
-                found = true;
-                *cached_user = user.clone();
-                break;
-            }
-        }
-
-        // Add user to cache if not found
-        if !found {
-            users_guard.push(user.clone());
-        }
-
+    fn update_user_in_db(&self, user: &User) {
         if user.social_credit.is_some() {
             if update_user_social_credit(&self.conn, &user.clone().social_credit.unwrap()).is_err() {
                 println!("Unable to update user social credit in db"); // error level
@@ -328,26 +299,6 @@ impl EventHandler {
         if update_user(&self.conn, &user).is_err() {
             println!("Unable to update user in db"); // error level
         }
-    }
-
-    fn find_user_in_cache_by_tag(&self, tag: &str) -> Option<User> {
-        let userdata_opt = extract_userdata_from_string(tag);
-        if userdata_opt.is_none() {
-            println!("Invalid user tag: {}", tag); // debug level
-            return None;
-        }
-        let userdata = userdata_opt.unwrap();
-        self.find_user_in_cache(&*userdata.0, &*userdata.1)
-    }
-
-    fn find_user_in_cache(&self, name: &str, url: &str) -> Option<User> {
-        let users_guard = self.cached_users.lock().unwrap();
-        for user in users_guard.iter() {
-            if user.name == name && user.url == url {
-                return Some(user.clone());
-            }
-        }
-        None
     }
 
     fn find_emoji_in_cache(&self, emoji_text: &str, room_id: &String) -> Option<Emoji> {

@@ -27,9 +27,6 @@ use crate::utils::user_util::{initial_admin_user_setup};
 // todo prevent user from changing their own social_credit score
 // todo test setup in empty room with only admin user, no messages
 //  -> query all room users on initial setup and create user_social_credit for every user, also handle user joining
-// todo if we setup in a room with messages and users the !list command gives nothing back
-//  -> remove the user cache because we cannot cache the user with the user_social_credit because there are mutliple social_credit scores per user per room
-
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
