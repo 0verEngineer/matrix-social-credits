@@ -77,7 +77,7 @@ impl EventHandler {
                     match event.original_content().unwrap() {
                         events::AnyMessageLikeEventContent::Reaction(content) => {
                             println!("Reaction content {:?}", content);
-                            let emoji = self.find_emoji_in_cache(&content.relates_to.key);
+                            let emoji = self.find_emoji_in_cache(&content.relates_to.key, &room.room_id().to_string());
                             if emoji.is_none() {
                                 println!("Emoji is not registered"); // todo debug level
                                 return;
@@ -190,13 +190,16 @@ impl EventHandler {
             }
             let social_credit = social_credit_opt.unwrap();
 
-            if self.find_emoji_in_cache(emoji).is_some() || find_emoji_in_db(&self.conn, &emoji.to_string()).is_some() {
+            let room_id = &room.room_id().to_string();
+
+            if self.find_emoji_in_cache(emoji, room_id).is_some() || find_emoji_in_db(&self.conn, &emoji.to_string(), room_id).is_some() {
                 room.send(RoomMessageEventContent::text_plain("Emoji already registered"), None).await.unwrap();
                 return true;
             }
 
             let emoji = Emoji {
                 id: -1,
+                room_id: room_id.to_string(),
                 emoji: emoji.to_string(),
                 social_credit,
             };
@@ -219,10 +222,10 @@ impl EventHandler {
         None
     }
 
-    fn find_emoji_in_cache(&self, emoji_text: &str) -> Option<Emoji> {
+    fn find_emoji_in_cache(&self, emoji_text: &str, room_id: &String) -> Option<Emoji> {
         let emojis_guard = self.cached_emojis.lock().unwrap();
         for emoji in emojis_guard.iter() {
-            if emoji.emoji == emoji_text {
+            if emoji.emoji == emoji_text && &emoji.room_id == room_id {
                 return Some(emoji.clone());
             }
         }

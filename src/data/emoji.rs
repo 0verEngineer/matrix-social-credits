@@ -4,6 +4,7 @@ use rusqlite::{Connection, Error, params, Params};
 #[derive(Clone)]
 pub struct Emoji {
     pub id: i32,
+    pub room_id: String,
     pub emoji: String,
     pub social_credit: i32,
 }
@@ -11,18 +12,20 @@ pub struct Emoji {
 pub fn create_table_emoji(conn: &Connection) {
     conn.execute("CREATE TABLE IF NOT EXISTS emoji (
             id INTEGER PRIMARY KEY,
+            room_id TEXT NOT NULL,
             emoji TEXT NOT NULL,
             social_credit INTEGER NOT NULL
     )", []).expect("Failed to create emoji table");
 }
 
 pub fn insert_emoji(conn: &Arc<Mutex<Connection>>, emoji: &Emoji) -> Result<(), Error> {
-    let sql = "INSERT INTO emoji (emoji, social_credit) VALUES (?1, ?2)";
+    let sql = "INSERT INTO emoji (room_id, emoji, social_credit) VALUES (?1, ?2, ?3)";
     let connection = conn.lock().unwrap();
 
     connection.execute(
         sql,
         &[
+            &emoji.room_id as &dyn rusqlite::ToSql,
             &emoji.emoji as &dyn rusqlite::ToSql,
             &emoji.social_credit as &dyn rusqlite::ToSql,
         ]
@@ -31,9 +34,9 @@ pub fn insert_emoji(conn: &Arc<Mutex<Connection>>, emoji: &Emoji) -> Result<(), 
     Ok(())
 }
 
-pub fn find_emoji_in_db(conn: &Arc<Mutex<Connection>>, emoji: &String) -> Option<Emoji> {
-    let sql = "SELECT * FROM emoji WHERE emoji = :emoji";
-    let params = params![emoji];
+pub fn find_emoji_in_db(conn: &Arc<Mutex<Connection>>, emoji: &String, room_id: &String) -> Option<Emoji> {
+    let sql = "SELECT * FROM emoji WHERE emoji = :emoji AND room_id = :room_id";
+    let params = params![emoji, room_id];
     match do_get_emoji_sql(conn, sql, params) {
         Ok(mut emoji) => {
             if emoji.len() == 1 {
@@ -77,8 +80,9 @@ fn do_get_emoji_sql<P:Params>(
     let emoji: Result<Vec<Emoji>, _> = stmt.query_map(params, |row| {
         Ok(Emoji {
             id: row.get(0)?,
-            emoji: row.get(1)?,
-            social_credit: row.get(2)?,
+            room_id: row.get(1)?,
+            emoji: row.get(2)?,
+            social_credit: row.get(3)?,
         })
     }).and_then(|mapped_rows| mapped_rows.collect());
 
