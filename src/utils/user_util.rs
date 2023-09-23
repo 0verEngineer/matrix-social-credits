@@ -16,13 +16,16 @@ pub fn extract_userdata_from_string(body: &str) -> Option<(String, String)> {
     None
 }
 
-pub fn setup_user(conn: &Arc<Mutex<Connection>>, room: Option<Joined>, sender: &String, user_type: UserType) -> Option<User> {
-    if let Some((username, domain)) = extract_userdata_from_string(sender) {
+pub fn setup_user(conn: &Arc<Mutex<Connection>>, room: Option<Joined>, user_tag: &String, user_type: UserType, initial_social_credit: i32) -> Option<User> {
+    if let Some((username, domain)) = extract_userdata_from_string(user_tag) {
         let user_opt = find_user_in_db(conn, &username, &domain);
-        if user_opt.is_some() {
-            setup_user_social_credit_for_room(conn, room, &user_opt.clone().unwrap());
-            return user_opt;
+        let mut mut_user_opt = user_opt.clone().take();
+        if let Some(ref mut actual_user) = mut_user_opt {
+            setup_user_social_credit_for_room(conn, room, actual_user, initial_social_credit);
+            return Some(actual_user.clone());
         }
+
+        println!("User {} not found in db, creating new one", user_tag); // debug level
 
         let user = User {
             id: -1,
@@ -38,36 +41,43 @@ pub fn setup_user(conn: &Arc<Mutex<Connection>>, room: Option<Joined>, sender: &
                 println!("Failed to find user in db after inserting");
                 return None;
             }
-            let user = user_opt.unwrap();
-
-            setup_user_social_credit_for_room(conn, room, &user);
-
-            return Some(user);
+            let mut mut_user = user_opt.unwrap();
+            setup_user_social_credit_for_room(conn, room, &mut mut_user, initial_social_credit);
+            return Some(mut_user.clone());
         }
     }
     None
 }
 
-fn setup_user_social_credit_for_room(conn: &Arc<Mutex<Connection>>, room: Option<Joined>, user: &User) {
+fn setup_user_social_credit_for_room(conn: &Arc<Mutex<Connection>>, room: Option<Joined>, user: &mut User, initial_social_credit: i32) {
     if room.is_some() {
         let room = room.unwrap();
 
         // todo this can be done better, query the user and the social_credit directly in one query in the setup_user method where this method is called the first time
         let social_credit_opt = find_user_social_credit_by_user_id_and_room_id(conn, user.id, &room.room_id().to_string());
-        if social_credit_opt.is_err() || social_credit_opt.is_ok() && social_credit_opt.unwrap().is_some() {
-            return;
+        if social_credit_opt.is_err() {
+            println!("Failed to find social credit for user {}", user.name); // error level
+        }
+        else if social_credit_opt.is_ok() {
+            let social_credit_opt = social_credit_opt.unwrap();
+            if social_credit_opt.is_some() {
+                user.social_credit = social_credit_opt;
+                return;
+            }
         }
 
         let social_credits = UserSocialCredit {
             id: -1,
             user_id: user.id,
             room_id: room.room_id().to_string(),
-            social_credit: 50,
+            social_credit: initial_social_credit,
         };
 
         if insert_user_social_credit(conn, &social_credits).is_err() {
             println!("Failed to insert social credit for user {}", user.name);
         }
+
+        user.social_credit = Some(social_credits);
     }
 }
 
@@ -81,7 +91,7 @@ pub fn initial_admin_user_setup(conn: &Arc<Mutex<Connection>>, username: &String
         }
     }
     else if admin_user.is_none() {
-        setup_user(&conn, None, &format!("@{}:{}", username, homeserver_url_relative), UserType::Admin).expect("Failed to construct or register admin user");
+        setup_user(&conn, None, &format!("@{}:{}", username, homeserver_url_relative), UserType::Admin, -1).expect("Failed to construct or register admin user");
     }
 }
 

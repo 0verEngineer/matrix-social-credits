@@ -106,6 +106,30 @@ pub fn find_all_users_in_db(conn: &Arc<Mutex<Connection>>) -> Option<Vec<User>> 
     }
 }
 
+pub fn find_all_users_with_social_credit_in_db(conn: &Arc<Mutex<Connection>>) -> Option<Vec<User>> {
+    let sql = "SELECT user.id, user.name, user.url, user.user_type, user_social_credit.id, user_social_credit.user_id, user_social_credit.room_id, user_social_credit.social_credit \
+                        FROM user INNER JOIN user_social_credit ON user.id=user_social_credit.user_id WHERE user.name NOT LIKE 'social-credit-system'";
+    let params = params![];
+    let connection = conn.lock().unwrap();
+
+    let mut stmt = match connection.prepare(&sql) {
+        Ok(stmt) => stmt,
+        Err(e) => {
+            println!("Database error: {}", e);
+            return None;
+        }
+    };
+
+    let users = do_get_user_sql_inner(params, &mut stmt, true);
+
+    if users.is_err() {
+        println!("Database error: {}", users.err().unwrap());
+        return None;
+    }
+
+    return Some(users.unwrap());
+}
+
 pub fn find_all_users_with_social_credit_for_room_in_db(conn: &Arc<Mutex<Connection>>, room_id: &String) -> Option<Vec<User>> {
     let sql = "SELECT user.id, user.name, user.url, user.user_type, user_social_credit.id, user_social_credit.user_id, user_social_credit.room_id, user_social_credit.social_credit \
                         FROM user INNER JOIN user_social_credit ON user.id=user_social_credit.user_id WHERE user_social_credit.room_id=?1 AND user.name NOT LIKE 'social-credit-system'";
