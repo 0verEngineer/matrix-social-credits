@@ -63,6 +63,19 @@ pub fn find_all_emoji_in_db(conn: &Arc<Mutex<Connection>>) -> Option<Vec<Emoji>>
     }
 }
 
+
+pub fn find_all_emoji_for_room_in_db(conn: &Arc<Mutex<Connection>>, room_id: &String) -> Option<Vec<Emoji>> {
+    let sql = "SELECT * FROM emoji WHERE room_id = :room_id";
+    let params = params![room_id];
+    match do_get_emoji_sql(conn, sql, params) {
+        Ok(emoji) => Some(emoji),
+        Err(e) => {
+            println!("Database error: {}", e);
+            None
+        },
+    }
+}
+
 fn do_get_emoji_sql<P:Params>(
     conn: &Arc<Mutex<Connection>>,
     sql: &str,

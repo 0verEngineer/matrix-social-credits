@@ -18,7 +18,7 @@ pub struct User {
     pub social_credit: Option<UserSocialCredit>
 }
 
-pub struct UserListAnswer {
+pub struct HtmlAndTextAnswer {
     pub text: String,
     pub html: String,
 }

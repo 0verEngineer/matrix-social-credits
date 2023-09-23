@@ -8,6 +8,7 @@ use rusqlite::Connection;
 use crate::data::emoji::{Emoji, find_all_emoji_in_db, find_emoji_in_db, insert_emoji};
 use crate::data::event::{Event, find_event_in_db, insert_event};
 use crate::data::user::{find_all_users_in_db, User, UserType};
+use crate::utils::emoji_util::get_emoji_list_answer;
 use crate::utils::user_util::{get_user_list_answer, setup_user};
 
 
@@ -122,6 +123,7 @@ impl EventHandler {
                             }
 
                             if self.handle_list(&room, &mut stripped_body).await { return; };
+                            if self.handle_list_emojis(&room, &mut stripped_body).await { return; };
                             if self.handle_register_emoji(room, &mut sender, &mut stripped_body).await { return; }
 
                             // reactions
@@ -146,6 +148,16 @@ impl EventHandler {
     async fn handle_list(&self, room: &Joined, stripped_body: &mut String) -> bool {
         if stripped_body == "!list" {
             let answer = get_user_list_answer(&self.conn, &room);
+            let content = RoomMessageEventContent::text_html(answer.text, answer.html);
+            room.send(content, None).await.unwrap();
+            true;
+        }
+        false
+    }
+
+    async fn handle_list_emojis(&self, room: &Joined, stripped_body: &mut String) -> bool {
+        if stripped_body == "!list_emoji" || stripped_body == "!list-emoji" || stripped_body == "!list_emojis" || stripped_body == "!list-emojis" {
+            let answer = get_emoji_list_answer(&self.conn, &room);
             let content = RoomMessageEventContent::text_html(answer.text, answer.html);
             room.send(content, None).await.unwrap();
             true;

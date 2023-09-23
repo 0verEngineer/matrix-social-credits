@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 use matrix_sdk::room::{Joined};
 use regex::Regex;
 use rusqlite::Connection;
-use crate::data::user::{find_all_users_with_social_credit_for_room_in_db, find_user_in_db, insert_user, update_user, User, UserListAnswer, UserType};
+use crate::data::user::{find_all_users_with_social_credit_for_room_in_db, find_user_in_db, insert_user, update_user, User, HtmlAndTextAnswer, UserType};
 use crate::data::user_social_credit::{find_user_social_credit_by_user_id_and_room_id, insert_user_social_credit, UserSocialCredit};
 
 pub fn extract_userdata_from_string(body: &str) -> Option<(String, String)> {
@@ -85,9 +85,9 @@ pub fn initial_admin_user_setup(conn: &Arc<Mutex<Connection>>, username: &String
     }
 }
 
-pub fn get_user_list_answer(conn: &Arc<Mutex<Connection>>, room: &Joined) -> UserListAnswer {
+pub fn get_user_list_answer(conn: &Arc<Mutex<Connection>>, room: &Joined) -> HtmlAndTextAnswer {
     let users_opt = find_all_users_with_social_credit_for_room_in_db(&conn, &room.room_id().to_string());
-    let empty_answer = UserListAnswer {
+    let empty_answer = HtmlAndTextAnswer {
         html: String::from("No scores"),
         text: String::from("No Scores"),
     };
@@ -131,7 +131,7 @@ pub fn get_user_list_answer(conn: &Arc<Mutex<Connection>>, room: &Joined) -> Use
         html_body.truncate(html_body.len() - 4);
     }
 
-    UserListAnswer {
+    HtmlAndTextAnswer {
         html: html_body.to_string(),
         text: text_body.to_string(),
     }
