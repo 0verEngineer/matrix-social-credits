@@ -62,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
     client.add_event_handler(on_stripped_state_member);
 
     let shared_conn = Arc::new(Mutex::new(conn));
-    let event_handler = Arc::new(EventHandler::new(shared_conn.clone(), client.clone(), username, homeserver_url.clone(), initial_social_credit));
+    let event_handler = Arc::new(EventHandler::new(shared_conn.clone(), username, homeserver_url.clone(), initial_social_credit));
 
     initial_admin_user_setup(&shared_conn, &admin_username, &homeserver_url_relative);
 

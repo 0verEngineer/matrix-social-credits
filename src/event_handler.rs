@@ -1,14 +1,13 @@
 use std::sync::{Arc, Mutex};
-use matrix_sdk::Client;
 use matrix_sdk::room::{Joined, Room};
 use matrix_sdk::ruma::{events};
 use matrix_sdk::ruma::events::{AnySyncMessageLikeEvent, AnyTimelineEvent};
 use matrix_sdk::ruma::events::room::encrypted::Relation;
 use matrix_sdk::ruma::events::room::message::{MessageType, RoomMessageEventContent};
 use rusqlite::Connection;
-use crate::data::emoji::{Emoji, find_all_emoji_in_db, find_emoji_in_db, insert_emoji};
+use crate::data::emoji::{Emoji, find_emoji_in_db, insert_emoji};
 use crate::data::event::{Event, find_event_in_db, insert_event};
-use crate::data::user::{find_all_users_with_social_credit_in_db, update_user, User, UserType};
+use crate::data::user::{update_user, User, UserType};
 use crate::data::user_social_credit::update_user_social_credit;
 use crate::utils::emoji_util::get_emoji_list_answer;
 use crate::utils::user_util::{extract_userdata_from_string, get_user_list_answer, setup_user};
@@ -16,20 +15,15 @@ use crate::utils::user_util::{extract_userdata_from_string, get_user_list_answer
 
 pub struct EventHandler {
     conn: Arc<Mutex<Connection>>,
-    client: Client,
-    cached_emojis: Arc<Mutex<Vec<Emoji>>>,
     bot_username: String,
     homeserver_url: String,
     initial_social_credit: i32,
 }
 
 impl EventHandler {
-    pub fn new(conn: Arc<Mutex<Connection>>, client: Client, bot_username: String, homeserver_url: String, initial_social_credit: i32) -> Self {
-        let emojis: Vec<Emoji> = find_all_emoji_in_db(&conn).unwrap_or(Vec::new());
+    pub fn new(conn: Arc<Mutex<Connection>>, bot_username: String, homeserver_url: String, initial_social_credit: i32) -> Self {
         EventHandler {
             conn,
-            client,
-            cached_emojis: Arc::new(Mutex::new(emojis)),
             bot_username,
             homeserver_url,
             initial_social_credit,
@@ -85,7 +79,7 @@ impl EventHandler {
                     match event.original_content().unwrap() {
                         events::AnyMessageLikeEventContent::Reaction(content) => {
                             println!("Reaction content {:?}", content);
-                            let emoji = self.find_emoji_in_cache(&content.relates_to.key, &room.room_id().to_string());
+                            let emoji = find_emoji_in_db(&self.conn, &content.relates_to.key, &room.room_id().to_string());
                             if emoji.is_none() {
                                 println!("Emoji {} is not registered", content.relates_to.key); // debug level
                                 return;
@@ -267,7 +261,7 @@ impl EventHandler {
 
             let room_id = &room.room_id().to_string();
 
-            if self.find_emoji_in_cache(emoji, room_id).is_some() || find_emoji_in_db(&self.conn, &emoji.to_string(), room_id).is_some() {
+            if find_emoji_in_db(&self.conn, &emoji.to_string(), room_id).is_some() {
                 room.send(RoomMessageEventContent::text_plain("Emoji already registered"), None).await.unwrap();
                 return true;
             }
@@ -280,7 +274,6 @@ impl EventHandler {
             };
 
             insert_emoji(&self.conn, &emoji).unwrap();
-            self.cached_emojis.lock().unwrap().push(emoji.clone());
             room.send(RoomMessageEventContent::text_plain(format!("Emoji registered: {} with social credit score: {}", emoji.emoji, emoji.social_credit)), None).await.unwrap();
             true;
         }
@@ -299,16 +292,6 @@ impl EventHandler {
         if update_user(&self.conn, &user).is_err() {
             println!("Unable to update user in db"); // error level
         }
-    }
-
-    fn find_emoji_in_cache(&self, emoji_text: &str, room_id: &String) -> Option<Emoji> {
-        let emojis_guard = self.cached_emojis.lock().unwrap();
-        for emoji in emojis_guard.iter() {
-            if emoji.emoji == emoji_text && &emoji.room_id == room_id {
-                return Some(emoji.clone());
-            }
-        }
-        None
     }
 
     fn is_user_the_bot(&self, name: &str, url: &str) -> bool {
