@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use crate::data::emoji::{Emoji, find_emoji_in_db, insert_emoji};
 use crate::data::event::{Event, find_event_in_db, insert_event};
 use crate::data::user::{update_user, User, UserType};
-use crate::data::user_social_credit::update_user_social_credit;
+use crate::data::user_room_data::update_user_room_data;
 use crate::utils::emoji_util::get_emoji_list_answer;
 use crate::utils::user_util::{compare_user, extract_userdata_from_string, get_user_list_answer, setup_user};
 
@@ -18,15 +18,19 @@ pub struct EventHandler {
     bot_username: String,
     homeserver_url: String,
     initial_social_credit: i32,
+    reaction_period_minutes: i32,
+    reaction_limit: i32,
 }
 
 impl EventHandler {
-    pub fn new(conn: Arc<Mutex<Connection>>, bot_username: String, homeserver_url: String, initial_social_credit: i32) -> Self {
+    pub fn new(conn: Arc<Mutex<Connection>>, bot_username: String, homeserver_url: String, initial_social_credit: i32, reaction_period_minutes: i32, reaction_limit: i32) -> Self {
         EventHandler {
             conn,
             bot_username,
             homeserver_url,
             initial_social_credit,
+            reaction_period_minutes,
+            reaction_limit,
         }
     }
 
@@ -35,27 +39,10 @@ impl EventHandler {
             Room::Joined(room) => {
                 //println!("Received a AnySyncMessageLikeEvent, type: {:?}, event {:?}", event.event_type().to_string(), event); // debug level
 
-                // Check if we already handled this event
-                let handled_event = find_event_in_db(&self.conn, &event.event_id().to_string());
-                if handled_event.is_some() {
-                    println!("Event {} already handled", handled_event.unwrap().id); // debug level
-                    return;
-                }
-
-                let new_handled_event = Event {
-                    id: event.event_id().to_string(),
-                    event_type: event.event_type().to_string(),
-                    handled: true,
-                };
-                if insert_event(&self.conn, &new_handled_event).is_err() {
-                    println!("Unable to insert event {} into db", new_handled_event.id); // debug level
-                    return;
-                }
-
-                // Check if the sender is the bot itself
+                if self.check_and_handle_event_already_handled(&event) { return; }
                 if self.handle_user_tag_is_the_bot(&event) { return; }
 
-                let mut sender = setup_user(&self.conn, Some(room.clone()), &event.sender().to_string(), UserType::Default, self.initial_social_credit);
+                let sender = setup_user(&self.conn, Some(room.clone()), &event.sender().to_string(), UserType::Default, self.initial_social_credit);
                 if sender.is_none() {
                     println!("Sender is none"); // debug level
                     return;
@@ -71,6 +58,7 @@ impl EventHandler {
                 }*/
 
                 if event.event_type().to_string() == "m.reaction" {
+                    let sender = sender.clone().unwrap();
                     if event.original_content().is_none() {
                         println!("Received a m.reaction event without original_content. Event: {:?}", event); // debug level
                         return;
@@ -89,6 +77,24 @@ impl EventHandler {
                             let relation = &event.original_content().unwrap().relation();
                             if relation.is_none() {
                                 println!("Relation is none");
+                                return;
+                            }
+
+                            if sender.room_data.is_none() {
+                                println!("Sender of reaction does not have room data"); // error level
+                                return;
+                            }
+
+                            let sender_user_room_data = sender.clone().room_data.unwrap();
+                            let time_till_user_can_react = sender_user_room_data.get_time_till_user_can_react(self.reaction_period_minutes, self.reaction_limit);
+                            if time_till_user_can_react > 0 {
+                                let minutes = time_till_user_can_react / 60;
+                                let seconds = time_till_user_can_react % 60;
+                                let text = format!("{}, you are still on cooldown, remaining time: {}m {}s", sender.name, minutes, seconds);
+                                room.send(RoomMessageEventContent::text_html(
+                                    text.clone(),
+                                    text
+                                ), None).await.unwrap();
                                 return;
                             }
 
@@ -128,26 +134,26 @@ impl EventHandler {
                                             }
 
                                             let sender_clone = sender.clone();
-                                            if sender_clone.is_none() {
-                                                println!("Sender of reaction is none"); // debug level
-                                                return;
-                                            }
 
-                                            if compare_user(&recipient, &sender_clone.unwrap()) {
+                                            if compare_user(&recipient, &sender_clone) {
                                                 println!("Sender and recipient of reaction are the same user"); // debug level
                                                 return;
                                             }
 
-                                            if recipient.social_credit.is_none() {
-                                                println!("Recipient of reaction does not have a social credit score"); // error level
+                                            if recipient.room_data.is_none() {
+                                                println!("Recipient of reaction does not have room data"); // error level
                                                 return;
                                             }
 
-                                            let mut recipient_social_credit = recipient.social_credit.unwrap();
-                                            recipient_social_credit.social_credit += emoji.social_credit;
-                                            recipient.social_credit = Some(recipient_social_credit);
+                                            let mut recipient_room_data = recipient.room_data.unwrap();
+                                            recipient_room_data.social_credit += emoji.social_credit;
+                                            recipient.room_data = Some(recipient_room_data);
+
+                                            // Update sender reactions
                                             self.update_user_in_db(&recipient);
-                                            let text = format!("<b>{}'s</b> new Social Credit Score: <b>{}</b>", recipient.name, recipient.social_credit.unwrap().social_credit);
+                                            sender.room_data.unwrap().add_reaction(&self.conn, self.reaction_period_minutes);
+
+                                            let text = format!("<b>{}'s</b> new Social Credit Score: <b>{}</b>", recipient.name, recipient.room_data.unwrap().social_credit);
                                             room.send(RoomMessageEventContent::text_html(
                                                 text.clone(),
                                                 text
@@ -168,6 +174,8 @@ impl EventHandler {
                         println!("Received a m.room.message event without original_content. Event: {:?}", event); // debug level
                         return;
                     }
+
+                    let mut sender = sender.unwrap();
 
                     match event.original_content().unwrap() {
                         events::AnyMessageLikeEventContent::RoomMessage(content) => {
@@ -195,6 +203,25 @@ impl EventHandler {
             },
             _ => { return }
         }
+    }
+
+    fn check_and_handle_event_already_handled(&self, event: &AnySyncMessageLikeEvent) -> bool {
+        let handled_event = find_event_in_db(&self.conn, &event.event_id().to_string());
+        if handled_event.is_some() {
+            println!("Event {} already handled", handled_event.unwrap().id); // debug level
+            return true;
+        }
+
+        let new_handled_event = Event {
+            id: event.event_id().to_string(),
+            event_type: event.event_type().to_string(),
+            handled: true,
+        };
+        if insert_event(&self.conn, &new_handled_event).is_err() {
+            println!("Unable to insert event {} into db", new_handled_event.id); // debug level
+            return true;
+        }
+        false
     }
 
     fn handle_user_tag_is_the_bot(&self, event: &AnySyncMessageLikeEvent) -> bool {
@@ -231,9 +258,9 @@ impl EventHandler {
 
     async fn handle_help(&self, room: &Joined, stripped_body: &mut String) -> bool {
         if stripped_body == "!help" {
-            let help_body = "<h3>Commands:</h3>
-                - <b>!list</b>: List all users and their social credit score for the current room<br>
-                - <b>!list_emoji</b>: List all registered emojis and their social credit score for the current room<br>
+            let help_body = "<h3>Commands:</h3><br>
+                - <b>!list</b>: List all users and their social credit score for the current room<br><br>
+                - <b>!list_emoji</b>: List all registered emojis and their social credit score for the current room<br><br>
                 - <b>!register_emoji</b> <emoji> <social_credit>: Register an emoji with a social credit score for the current room. Example: !register_emoji 😑 -25
             ".to_string();
             let content = RoomMessageEventContent::text_html(help_body.clone(), help_body);
@@ -243,13 +270,9 @@ impl EventHandler {
         false
     }
 
-    async fn handle_register_emoji(&self, room: Joined, sender: &mut Option<User>, body: &mut String) -> bool {
+    async fn handle_register_emoji(&self, room: Joined, sender: &mut User, body: &mut String) -> bool {
         if body.starts_with("!register_emoji") || body.starts_with("!register-emoji") {
-            if sender.is_none() {
-                println!("Sender is none"); // debug level
-                return true;
-            }
-            match sender.clone().unwrap().user_type {
+            match sender.clone().user_type {
                 UserType::Admin => {},
                 _ => {
                     room.send(RoomMessageEventContent::text_plain("You are not allowed to use this command"), None).await.unwrap();
@@ -308,12 +331,12 @@ impl EventHandler {
         false
     }
 
-    /// Update the user in the cache and the database, also updates the social credit score in the database
-    /// if the user has a social credit score
+    /// Update the user in the cache and the database, also updates the room data in the database
+    /// if the user has room_data
     fn update_user_in_db(&self, user: &User) {
-        if user.social_credit.is_some() {
-            if update_user_social_credit(&self.conn, &user.clone().social_credit.unwrap()).is_err() {
-                println!("Unable to update user social credit in db"); // error level
+        if user.room_data.is_some() {
+            if update_user_room_data(&self.conn, &user.clone().room_data.unwrap()).is_err() {
+                println!("Unable to update user room data in db"); // error level
             }
         }
 

@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 use rusqlite::{Connection, Error, params, Params, Statement, ToSql};
-use crate::data::user_social_credit::UserSocialCredit;
+use crate::data::user_reaction::{get_user_reactions, UserReaction};
+use crate::data::user_room_data::UserRoomData;
 
 #[derive(Clone)]
 pub enum UserType {
@@ -15,7 +16,7 @@ pub struct User {
     pub name: String,
     pub url: String,
     pub user_type: UserType,
-    pub social_credit: Option<UserSocialCredit>
+    pub room_data: Option<UserRoomData>
 }
 
 pub struct HtmlAndTextAnswer {
@@ -94,45 +95,9 @@ pub fn find_user_in_db(
     }
 }
 
-pub fn find_all_users_in_db(conn: &Arc<Mutex<Connection>>) -> Option<Vec<User>> {
-    let sql = "SELECT * FROM user WHERE name NOT LIKE 'social-credit-system'";
-    let params = params![];
-    match do_get_user_sql(conn, sql, params) {
-        Ok(users) => Some(users),
-        Err(e) => {
-            println!("Database error: {}", e);
-            None
-        },
-    }
-}
-
-pub fn find_all_users_with_social_credit_in_db(conn: &Arc<Mutex<Connection>>) -> Option<Vec<User>> {
-    let sql = "SELECT user.id, user.name, user.url, user.user_type, user_social_credit.id, user_social_credit.user_id, user_social_credit.room_id, user_social_credit.social_credit \
-                        FROM user INNER JOIN user_social_credit ON user.id=user_social_credit.user_id WHERE user.name NOT LIKE 'social-credit-system'";
-    let params = params![];
-    let connection = conn.lock().unwrap();
-
-    let mut stmt = match connection.prepare(&sql) {
-        Ok(stmt) => stmt,
-        Err(e) => {
-            println!("Database error: {}", e);
-            return None;
-        }
-    };
-
-    let users = do_get_user_sql_inner(params, &mut stmt, true);
-
-    if users.is_err() {
-        println!("Database error: {}", users.err().unwrap());
-        return None;
-    }
-
-    return Some(users.unwrap());
-}
-
-pub fn find_all_users_with_social_credit_for_room_in_db(conn: &Arc<Mutex<Connection>>, room_id: &String) -> Option<Vec<User>> {
-    let sql = "SELECT user.id, user.name, user.url, user.user_type, user_social_credit.id, user_social_credit.user_id, user_social_credit.room_id, user_social_credit.social_credit \
-                        FROM user INNER JOIN user_social_credit ON user.id=user_social_credit.user_id WHERE user_social_credit.room_id=?1 AND user.name NOT LIKE 'social-credit-system'";
+pub fn find_all_users_with_room_data_in_db(conn: &Arc<Mutex<Connection>>, room_id: &String) -> Option<Vec<User>> {
+    let sql = "SELECT user.id, user.name, user.url, user.user_type, user_room_data.id, user_room_data.user_id, user_room_data.room_id, user_room_data.social_credit \
+                        FROM user INNER JOIN user_room_data ON user.id=user_room_data.user_id WHERE user_room_data.room_id=?1 AND user.name NOT LIKE 'social-credit-system'";
     let params = params![room_id];
     let connection = conn.lock().unwrap();
 
@@ -144,7 +109,7 @@ pub fn find_all_users_with_social_credit_for_room_in_db(conn: &Arc<Mutex<Connect
         }
     };
 
-    let users = do_get_user_sql_inner(params, &mut stmt, true);
+    let users = do_get_user_sql_inner(params, &mut stmt, &connection, true);
 
     if users.is_err() {
         println!("Database error: {}", users.err().unwrap());
@@ -168,12 +133,12 @@ fn do_get_user_sql<P: Params>(
         }
     };
 
-    let users = do_get_user_sql_inner(params, &mut stmt, false);
+    let users = do_get_user_sql_inner(params, &mut stmt, &connection, false);
 
     return users;
 }
 
-fn do_get_user_sql_inner<P: Params>(params: P, stmt: &mut Statement, with_social_credit: bool) -> Result<Vec<User>, Error> {
+fn do_get_user_sql_inner<P: Params>(params: P, stmt: &mut Statement, conn: &Connection, with_room_data: bool) -> Result<Vec<User>, Error> {
     let users: Result<Vec<User>, _> = stmt.query_map(params, |row| {
         Ok(User {
             id: row.get(0)?,
@@ -185,12 +150,16 @@ fn do_get_user_sql_inner<P: Params>(params: P, stmt: &mut Statement, with_social
                 2 => UserType::Admin,
                 _ => UserType::Default,
             },
-            social_credit: match with_social_credit {
-                true => Some(UserSocialCredit {
+            room_data: match with_room_data {
+                true => Some(UserRoomData {
                     id: row.get(4)?,
                     user_id: row.get(5)?,
                     room_id: row.get(6)?,
                     social_credit: row.get(7)?,
+                    last_reactions: get_user_reactions(conn, row.get(4)?)
+                        .or_else(|_| -> Result<Vec<UserReaction>, Error> {
+                            Ok(Vec::<UserReaction>::new())
+                        }).unwrap(),
                 }),
                 false => None,
             },

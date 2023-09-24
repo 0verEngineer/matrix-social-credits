@@ -16,7 +16,7 @@ pub fn get_emoji_list_answer(conn: &Arc<Mutex<Connection>>, room: &Joined) -> Ht
     }
 
     let mut text_body = String::from("Registered Emojis: ");
-    let mut html_body = String::from("<h3>Registered Emojis:</h3>");
+    let mut html_body = String::from("<h3>Registered Emojis:</h3><br>");
 
     let mut emojis = emojis_opt.unwrap();
 

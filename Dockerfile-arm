@@ -1,0 +1,25 @@
+# Build stage
+FROM rust:1.72.1-buster AS builder
+
+# todo fix
+# Set up the Rust target for cross-compilation
+RUN rustup target add aarch64-unknown-linux-gnu
+
+# Set up a working directory
+WORKDIR /usr/src/matrix-social-credits
+
+COPY ./src ./src
+COPY Cargo.toml Cargo.lock ./
+
+RUN cargo build --release --target=aarch64-unknown-linux-gnu
+
+# Final stage
+FROM debian:buster-slim
+
+# Use a Debian image for ARM64
+FROM rust:1.72.1
+
+# Copy the binary from the builder stage
+COPY --from=builder /usr/src/matrix-social-credits/target/aarch64-unknown-linux-gnu/release/matrix-social-credits /usr/local/bin/
+
+CMD ["matrix-social-credits"]

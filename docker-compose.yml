@@ -1,0 +1,24 @@
+version: '3'
+
+services:
+  matrix-social-credit:
+    image: 0verengineer/matrix-social-credits
+    environment:
+      # The initial social credit that a user has
+      INITIAL_SOCIAL_CREDIT: 250
+      # Username of the user that will be the admin of the social credit system, user needs to be on the MATRIX_HOMESERVER_URL
+      ADMIN_USERNAME: <username>
+      # Username of the bot user
+      MATRIX_USERNAME: social-credit-system
+      # Password of the bot user
+      MATRIX_PASSWORD: <matrix-admin-password>
+      # Homeserver url of the bot user for example https://matrix.org
+      MATRIX_HOMESERVER_URL: <your homeserver url>
+      # Only 2 social credit change reactions are possible within REACTION_TIMESPAN
+      REACTION_LIMIT: 2
+      # Timespan in minutes for the REACTION_LIMIT, like a cooldown
+      REACTION_TIMESPAN: 20
+      DB_PATH: /data/social_credit.db
+    volumes:
+      - ./data/:/data
+    restart: unless-stopped

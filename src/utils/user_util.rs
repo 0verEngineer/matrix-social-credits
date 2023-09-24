@@ -2,8 +2,8 @@ use std::sync::{Arc, Mutex};
 use matrix_sdk::room::{Joined};
 use regex::Regex;
 use rusqlite::Connection;
-use crate::data::user::{find_all_users_with_social_credit_for_room_in_db, find_user_in_db, insert_user, update_user, User, HtmlAndTextAnswer, UserType};
-use crate::data::user_social_credit::{find_user_social_credit_by_user_id_and_room_id, insert_user_social_credit, UserSocialCredit};
+use crate::data::user::{find_all_users_with_room_data_in_db, find_user_in_db, insert_user, update_user, User, HtmlAndTextAnswer, UserType};
+use crate::data::user_room_data::{find_user_room_data_by_user_id_and_room_id, insert_user_room_data, UserRoomData};
 
 pub fn compare_user(user1: &User, user2: &User) -> bool {
     user1.name == user2.name && user1.url == user2.url
@@ -25,7 +25,7 @@ pub fn setup_user(conn: &Arc<Mutex<Connection>>, room: Option<Joined>, user_tag:
         let user_opt = find_user_in_db(conn, &username, &domain);
         let mut mut_user_opt = user_opt.clone().take();
         if let Some(ref mut actual_user) = mut_user_opt {
-            setup_user_social_credit_for_room(conn, room, actual_user, initial_social_credit);
+            setup_user_room_data_for_room(conn, room, actual_user, initial_social_credit);
             return Some(actual_user.clone());
         }
 
@@ -36,7 +36,7 @@ pub fn setup_user(conn: &Arc<Mutex<Connection>>, room: Option<Joined>, user_tag:
             name: username.clone(),
             url: domain.clone(),
             user_type,
-            social_credit: None,
+            room_data: None,
         };
 
         if insert_user(conn, &user).is_ok() {
@@ -46,42 +46,39 @@ pub fn setup_user(conn: &Arc<Mutex<Connection>>, room: Option<Joined>, user_tag:
                 return None;
             }
             let mut mut_user = user_opt.unwrap();
-            setup_user_social_credit_for_room(conn, room, &mut mut_user, initial_social_credit);
+            setup_user_room_data_for_room(conn, room, &mut mut_user, initial_social_credit);
             return Some(mut_user.clone());
         }
     }
     None
 }
 
-fn setup_user_social_credit_for_room(conn: &Arc<Mutex<Connection>>, room: Option<Joined>, user: &mut User, initial_social_credit: i32) {
+fn setup_user_room_data_for_room(conn: &Arc<Mutex<Connection>>, room: Option<Joined>, user: &mut User, initial_social_credit: i32) {
     if room.is_some() {
         let room = room.unwrap();
-
-        // todo this can be done better, query the user and the social_credit directly in one query in the setup_user method where this method is called the first time
-        let social_credit_opt = find_user_social_credit_by_user_id_and_room_id(conn, user.id, &room.room_id().to_string());
-        if social_credit_opt.is_err() {
-            println!("Failed to find social credit for user {}", user.name); // error level
-        }
-        else if social_credit_opt.is_ok() {
-            let social_credit_opt = social_credit_opt.unwrap();
-            if social_credit_opt.is_some() {
-                user.social_credit = social_credit_opt;
-                return;
-            }
+        let room_data = find_user_room_data_by_user_id_and_room_id(conn, user.id, &room.room_id().to_string());
+        if room_data.is_ok() {
+            let room_data = room_data.unwrap();
+            user.room_data = Some(room_data);
+            return;
         }
 
-        let social_credits = UserSocialCredit {
+        let room_id = room.room_id().to_string();
+        println!("Room data for user {} and room {} not found in db, creating", user.name, room_id); // debug level
+
+        let room_data = UserRoomData {
             id: -1,
             user_id: user.id,
-            room_id: room.room_id().to_string(),
+            room_id,
             social_credit: initial_social_credit,
+            last_reactions: Vec::new(),
         };
 
-        if insert_user_social_credit(conn, &social_credits).is_err() {
-            println!("Failed to insert social credit for user {}", user.name);
+        if insert_user_room_data(conn, &room_data).is_err() {
+            println!("Failed to insert room data for user {}", user.name);
         }
 
-        user.social_credit = Some(social_credits);
+        user.room_data = Some(room_data);
     }
 }
 
@@ -100,7 +97,7 @@ pub fn initial_admin_user_setup(conn: &Arc<Mutex<Connection>>, username: &String
 }
 
 pub fn get_user_list_answer(conn: &Arc<Mutex<Connection>>, room: &Joined) -> HtmlAndTextAnswer {
-    let users_opt = find_all_users_with_social_credit_for_room_in_db(&conn, &room.room_id().to_string());
+    let users_opt = find_all_users_with_room_data_in_db(&conn, &room.room_id().to_string());
     let empty_answer = HtmlAndTextAnswer {
         html: String::from("No scores"),
         text: String::from("No Scores"),
@@ -111,7 +108,7 @@ pub fn get_user_list_answer(conn: &Arc<Mutex<Connection>>, room: &Joined) -> Htm
     }
 
     let mut text_body = String::from("Social Credit Scores: ");
-    let mut html_body = String::from("<h3>Social Credit Scores:</h3>");
+    let mut html_body = String::from("<h3>Social Credit Scores:</h3><br>");
 
     let mut users = users_opt.unwrap();
 
@@ -121,19 +118,19 @@ pub fn get_user_list_answer(conn: &Arc<Mutex<Connection>>, room: &Joined) -> Htm
 
     // Sort users by social credit
     users.sort_by(|a, b| {
-        let a_credit = a.social_credit.as_ref().map_or(0, |sc| sc.social_credit);
-        let b_credit = b.social_credit.as_ref().map_or(0, |sc| sc.social_credit);
+        let a_credit = a.room_data.as_ref().map_or(0, |sc| sc.social_credit);
+        let b_credit = b.room_data.as_ref().map_or(0, |sc| sc.social_credit);
         b_credit.cmp(&a_credit)
     });
 
     for user in users {
-        let social_credit_opt = user.social_credit;
-        if social_credit_opt.is_none() {
+        let room_data_opt = user.room_data;
+        if room_data_opt.is_none() {
             continue;
         }
-        let social_credit = social_credit_opt.unwrap();
-        text_body.push_str(&format!("{}: {},", user.name, social_credit.social_credit));
-        html_body.push_str(&format!("{}: <b>{}</b><br>", user.name, social_credit.social_credit));
+        let room_data = room_data_opt.unwrap();
+        text_body.push_str(&format!("{}: {},", user.name, room_data.social_credit));
+        html_body.push_str(&format!("{}: <b>{}</b><br>", user.name, room_data.social_credit));
     }
 
     // Remove the last comma
