@@ -17,6 +17,7 @@ pub struct EventHandler {
     conn: Arc<Mutex<Connection>>,
     bot_username: String,
     homeserver_url: String,
+    homeserver_url_without_protocol: String,
     initial_social_credit: i32,
     reaction_period_minutes: i32,
     reaction_limit: i32,
@@ -27,7 +28,8 @@ impl EventHandler {
         EventHandler {
             conn,
             bot_username,
-            homeserver_url,
+            homeserver_url: homeserver_url.clone(),
+            homeserver_url_without_protocol: homeserver_url.strip_prefix("https://").unwrap_or(homeserver_url.strip_prefix("http://").unwrap_or(&homeserver_url)).to_string(),
             initial_social_credit,
             reaction_period_minutes,
             reaction_limit,
@@ -40,7 +42,7 @@ impl EventHandler {
                 //println!("Received a AnySyncMessageLikeEvent, type: {:?}, event {:?}", event.event_type().to_string(), event); // debug level
 
                 if self.check_and_handle_event_already_handled(&event) { return; }
-                if self.handle_user_tag_is_the_bot(&event) { return; }
+                if self.handle_sender_is_the_bot(&event) { return; }
 
                 let sender = setup_user(&self.conn, Some(room.clone()), &event.sender().to_string(), UserType::Default, self.initial_social_credit);
                 if sender.is_none() {
@@ -67,7 +69,12 @@ impl EventHandler {
                     match event.original_content().unwrap() {
                         events::AnyMessageLikeEventContent::Reaction(content) => {
                             println!("Reaction content {:?}", content);
-                            let emoji = find_emoji_in_db(&self.conn, &content.relates_to.key, &room.room_id().to_string());
+                            let mut emoji_text = content.relates_to.key.clone();
+                            if emoji_text.ends_with("\u{fe0f}") {
+                                emoji_text = emoji_text.replace("\u{fe0f}", "");
+                            }
+
+                            let emoji = find_emoji_in_db(&self.conn, &emoji_text, &room.room_id().to_string());
                             if emoji.is_none() {
                                 println!("Emoji {} is not registered", content.relates_to.key); // debug level
                                 return;
@@ -153,7 +160,8 @@ impl EventHandler {
                                             self.update_user_in_db(&recipient);
                                             sender.room_data.unwrap().add_reaction(&self.conn, self.reaction_period_minutes);
 
-                                            let text = format!("<b>{}'s</b> new Social Credit Score: <b>{}</b>", recipient.name, recipient.room_data.unwrap().social_credit);
+                                            let neg_pos_text = if emoji.social_credit < 0 { "negatively" } else { "positively" };
+                                            let text = format!("<b>{}</b> {} changed <b>{}'s</b> Social Credit Score: <b>{}</b>", sender.name, neg_pos_text, recipient.name, recipient.room_data.unwrap().social_credit);
                                             room.send(RoomMessageEventContent::text_html(
                                                 text.clone(),
                                                 text
@@ -224,7 +232,7 @@ impl EventHandler {
         false
     }
 
-    fn handle_user_tag_is_the_bot(&self, event: &AnySyncMessageLikeEvent) -> bool {
+    fn handle_sender_is_the_bot(&self, event: &AnySyncMessageLikeEvent) -> bool {
         let sender_userdata = extract_userdata_from_string(event.sender().to_string().as_str());
         if sender_userdata.is_some() {
             let sender_userdata = sender_userdata.unwrap();
@@ -346,7 +354,7 @@ impl EventHandler {
     }
 
     fn is_user_the_bot(&self, name: &str, url: &str) -> bool {
-        name == self.bot_username && url == self.homeserver_url
+        name == self.bot_username && url == self.homeserver_url_without_protocol
     }
 }
 
