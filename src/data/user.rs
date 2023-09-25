@@ -156,7 +156,7 @@ fn do_get_user_sql_inner<P: Params>(params: P, stmt: &mut Statement, conn: &Conn
                     user_id: row.get(5)?,
                     room_id: row.get(6)?,
                     social_credit: row.get(7)?,
-                    last_reactions: get_user_reactions(conn, row.get(4)?)
+                    reactions: get_user_reactions(conn, row.get(4)?)
                         .or_else(|_| -> Result<Vec<UserReaction>, Error> {
                             Ok(Vec::<UserReaction>::new())
                         }).unwrap(),

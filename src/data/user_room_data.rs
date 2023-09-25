@@ -1,7 +1,8 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 use rusqlite::{Connection, Error, params, Result};
-use crate::data::user_reaction::{cleanup_table_user_reaction, get_user_reactions, UserReaction};
+use crate::data::user_reaction::{get_user_reactions, UserReaction};
+
 
 #[derive(Clone)]
 pub struct UserRoomData {
@@ -9,7 +10,7 @@ pub struct UserRoomData {
     pub user_id: i32,
     pub room_id: String,
     pub social_credit: i32,
-    pub last_reactions: Vec<UserReaction>,
+    pub reactions: Vec<UserReaction>,
 }
 
 impl UserRoomData {
@@ -20,7 +21,7 @@ impl UserRoomData {
         let now = SystemTime::now();
 
         // Filter out the reactions that are outside the reaction_period_minutes
-        let recent_reactions: Vec<_> = self.last_reactions.iter()
+        let recent_reactions: Vec<_> = self.reactions.iter()
             .filter(|&reaction| now.duration_since(reaction.time).unwrap() <= Duration::from_secs((reaction_period_minutes * 60) as u64))
             .collect();
 
@@ -41,24 +42,30 @@ impl UserRoomData {
         0
     }
 
-    pub fn add_reaction(&mut self, conn: &Arc<Mutex<Connection>>, reaction_period_minutes: i32) {
+    pub fn has_user_already_reacted_to_message_event_id(&self, message_event_id: &String) -> bool {
+        self.reactions.iter().any(|reaction| reaction.message_event_id == *message_event_id)
+    }
+
+    pub fn add_reaction(&mut self, conn: &Arc<Mutex<Connection>>, reaction_period_minutes: i32, message_event_id: &String) {
         let now = SystemTime::now();
-        let reaction_period_duration = Duration::from_secs((reaction_period_minutes * 60) as u64);
-        let prev = now - reaction_period_duration;
-        let reaction = UserReaction::new(self.id, now);
-        self.last_reactions.push(reaction.clone());
+        let reaction = UserReaction::new(self.id, now, message_event_id.clone());
+        self.reactions.push(reaction.clone());
 
         if reaction.insert(&conn.lock().unwrap()).is_err() {
             println!("Failed to insert user reaction");
         }
 
+        // todo configurable (weekly) db cleanup
+        /*
+        let reaction_period_duration = Duration::from_secs((reaction_period_minutes * 60) as u64);
+        let prev = now - reaction_period_duration;
         self.last_reactions.retain(|reaction| now.duration_since(reaction.time).unwrap_or(Duration::from_secs(0)) <= reaction_period_duration);
         if cleanup_table_user_reaction(
             &conn.lock().unwrap(),
             prev.duration_since(SystemTime::UNIX_EPOCH).unwrap_or(Duration::from_secs(0)).as_secs() as i32).is_err()
         {
             println!("Failed to cleanup user reactions");
-        }
+        }*/
     }
 }
 
@@ -127,7 +134,7 @@ pub fn find_user_room_data_by_user_id_and_room_id(conn: &Arc<Mutex<Connection>>,
             user_id: row.get(1)?,
             room_id: row.get(2)?,
             social_credit: row.get(3)?,
-            last_reactions: reactions
+            reactions: reactions
         };
 
         Ok(user_room_data)

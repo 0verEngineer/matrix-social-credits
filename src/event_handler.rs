@@ -140,6 +140,11 @@ impl EventHandler {
                                                 return;
                                             }
 
+                                            if sender_user_room_data.has_user_already_reacted_to_message_event_id(&message_like_event.event_id().to_string()) {
+                                                println!("Sender @{}:{} already reacted to this message event: {}", sender.name, sender.url, event.event_id()); // debug level
+                                                return;
+                                            }
+
                                             let sender_clone = sender.clone();
 
                                             if compare_user(&recipient, &sender_clone) {
@@ -153,15 +158,16 @@ impl EventHandler {
                                             }
 
                                             let mut recipient_room_data = recipient.room_data.unwrap();
+                                            let old_social_credit = recipient_room_data.social_credit;
                                             recipient_room_data.social_credit += emoji.social_credit;
                                             recipient.room_data = Some(recipient_room_data);
 
                                             // Update sender reactions
                                             self.update_user_in_db(&recipient);
-                                            sender.room_data.unwrap().add_reaction(&self.conn, self.reaction_period_minutes);
+                                            sender.room_data.unwrap().add_reaction(&self.conn, self.reaction_period_minutes, &message_like_event.event_id().to_string());
 
                                             let neg_pos_text = if emoji.social_credit < 0 { "negatively" } else { "positively" };
-                                            let text = format!("<b>{}</b> {} changed <b>{}'s</b> Social Credit Score: <b>{}</b>", sender.name, neg_pos_text, recipient.name, recipient.room_data.unwrap().social_credit);
+                                            let text = format!("<b>{}</b> {} changed <b>{}'s</b> Social Credit Score from <b>{}</b> to <b>{}</b>", sender.name, neg_pos_text, recipient.name, old_social_credit, recipient.room_data.unwrap().social_credit);
                                             room.send(RoomMessageEventContent::text_html(
                                                 text.clone(),
                                                 text

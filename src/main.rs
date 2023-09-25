@@ -22,8 +22,7 @@ use crate::utils::user_util::{initial_admin_user_setup};
 
 // todo session preservation and emoji verification
 // todo logging + log levels + file logging
-// todo test setup in empty room with only admin user, no messages
-//  -> query all room users on initial setup and create user_room_data for every user, also handle user joining
+// todo query all room users on initial setup and create user_room_data for every user, also handle user joining
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
