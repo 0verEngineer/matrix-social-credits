@@ -19,11 +19,15 @@ Matrix bot for a social credit system
 
   <p align="center">
     <br />
+    <a href="https://codeberg.org/OverEngineer/matrix-social-credits">Codeberg</a>
+    ·
+    <a href="https://github.com/0verEngineer/matrix-social-credits">Github</a>
+    .
+    <a href="https://hub.docker.com/r/0verengineer/matrix-social-credits">Docker Hub</a>
+    .
     <a href="https://github.com/0verEngineer/matrix-social-credits/issues">Report Bug</a>
     ·
     <a href="https://github.com/0verEngineer/matrix-social-credits/issues">Request Feature</a>
-    .
-    <a href="https://hub.docker.com/r/0verengineer/matrix-social-credits">Docker Hub</a>
   </p>
 </div>
 
