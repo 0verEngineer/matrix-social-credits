@@ -96,10 +96,21 @@ pub fn find_user_in_db(
     }
 }
 
-pub fn find_all_users_with_room_data_in_db(conn: &Arc<Mutex<Connection>>, room_id: &String) -> Option<Vec<User>> {
+/// All users that have room data for `room_id`, except the bot itself.
+///
+/// The bot used to be filtered by the hardcoded name `social-credit-system`, which silently
+/// stopped working as soon as the bot account was called anything else. It is now excluded by
+/// the localpart and server name of its actual user id.
+pub fn find_all_users_with_room_data_in_db(
+    conn: &Arc<Mutex<Connection>>,
+    room_id: &String,
+    own_localpart: &str,
+    own_server_name: &str,
+) -> Option<Vec<User>> {
     let sql = "SELECT user.id, user.name, user.url, user.user_type, user_room_data.id, user_room_data.user_id, user_room_data.room_id, user_room_data.social_credit \
-                        FROM user INNER JOIN user_room_data ON user.id=user_room_data.user_id WHERE user_room_data.room_id=?1 AND user.name NOT LIKE 'social-credit-system'";
-    let params = params![room_id];
+                        FROM user INNER JOIN user_room_data ON user.id=user_room_data.user_id \
+                        WHERE user_room_data.room_id=?1 AND NOT (user.name=?2 AND user.url=?3)";
+    let params = params![room_id, own_localpart, own_server_name];
     let connection = conn.lock().unwrap();
 
     let mut stmt = match connection.prepare(&sql) {

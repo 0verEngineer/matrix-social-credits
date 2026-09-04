@@ -13,6 +13,5 @@ matrix-sdk = { version = "0.18.0", default-features = false }
 anyhow = "1.0.104"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 tokio = { version = "1.53.1", features = ["full"] }
-regex = "1.13.1"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

@@ -1636,7 +1636,6 @@ version = "0.0.9-alpha"
 dependencies = [
  "anyhow",
  "matrix-sdk",
- "regex",
  "rusqlite",
  "tokio",
  "tracing",

@@ -3,6 +3,7 @@ use matrix_sdk::{Room, RoomState};
 use matrix_sdk::ruma::{events};
 use matrix_sdk::ruma::events::{AnySyncMessageLikeEvent, AnySyncTimelineEvent};
 use matrix_sdk::ruma::events::room::message::{MessageType, RoomMessageEventContent};
+use matrix_sdk::ruma::{OwnedUserId, UserId};
 use rusqlite::Connection;
 use crate::data::emoji::{Emoji, find_emoji_in_db, insert_emoji};
 use crate::data::event::{Event, find_event_in_db, insert_event};
@@ -10,27 +11,28 @@ use crate::data::user::{update_user, User, UserType};
 use crate::data::user_room_data::update_user_room_data;
 use crate::utils::emoji_util::get_emoji_list_answer;
 use crate::utils::matrix_util::send_message;
-use crate::utils::user_util::{compare_user, extract_userdata_from_string, get_user_list_answer, setup_user};
+use crate::utils::user_util::{compare_user, get_user_list_answer, setup_user};
 use tracing::{debug, error, trace};
 
 
 pub struct EventHandler {
     conn: Arc<Mutex<Connection>>,
-    bot_username: String,
-    homeserver_url: String,
-    homeserver_url_without_protocol: String,
+    /// The bot's own user id, as reported by the homeserver after login.
+    ///
+    /// This replaces the previous name plus homeserver-URL pair. Deriving the domain from
+    /// `MATRIX_HOMESERVER_URL` is wrong whenever `.well-known` delegation is in play, because
+    /// then the URL host and the server name in the user id are different hosts.
+    own_user_id: OwnedUserId,
     initial_social_credit: i32,
     reaction_period_minutes: i32,
     reaction_limit: i32,
 }
 
 impl EventHandler {
-    pub fn new(conn: Arc<Mutex<Connection>>, bot_username: String, homeserver_url: String, initial_social_credit: i32, reaction_period_minutes: i32, reaction_limit: i32) -> Self {
+    pub fn new(conn: Arc<Mutex<Connection>>, own_user_id: OwnedUserId, initial_social_credit: i32, reaction_period_minutes: i32, reaction_limit: i32) -> Self {
         EventHandler {
             conn,
-            bot_username,
-            homeserver_url: homeserver_url.clone(),
-            homeserver_url_without_protocol: homeserver_url.strip_prefix("https://").unwrap_or(homeserver_url.strip_prefix("http://").unwrap_or(&homeserver_url)).to_string(),
+            own_user_id,
             initial_social_credit,
             reaction_period_minutes,
             reaction_limit,
@@ -47,7 +49,7 @@ impl EventHandler {
         if self.check_and_handle_event_already_handled(&event) { return; }
         if self.handle_sender_is_the_bot(&event) { return; }
 
-        let sender = setup_user(&self.conn, Some(room.clone()), &event.sender().to_string(), UserType::Default, self.initial_social_credit);
+        let sender = setup_user(&self.conn, Some(room.clone()), event.sender(), UserType::Default, self.initial_social_credit);
         if sender.is_none() {
             debug!(sender = %event.sender(), "Unable to resolve the sender of the event");
             return;
@@ -113,18 +115,17 @@ impl EventHandler {
                     trace!(sender = %message_like_event.sender(), "Recipient of the reaction");
 
                     // The sender here is the user where the social credit score should be changed, so it is the recipient of the reaction
-                    let recipient_user_tag = message_like_event.sender().to_string();
-                    let recipient_opt = setup_user(&self.conn, Some(room.clone()), &recipient_user_tag, UserType::Default, self.initial_social_credit);
-                    if recipient_opt.is_none() {
-                        debug!(user = %recipient_user_tag, "Unable to resolve the recipient of the reaction");
-                        return;
-                    }
-                    let mut recipient = recipient_opt.clone().unwrap();
-
-                    if self.is_user_the_bot(&recipient.name, &recipient.url) {
+                    let recipient_user_id = message_like_event.sender();
+                    if self.is_user_the_bot(recipient_user_id) {
                         debug!("Recipient of reaction is the bot itself");
                         return;
                     }
+
+                    let recipient_opt = setup_user(&self.conn, Some(room.clone()), recipient_user_id, UserType::Default, self.initial_social_credit);
+                    let Some(mut recipient) = recipient_opt else {
+                        debug!(user = %recipient_user_id, "Unable to resolve the recipient of the reaction");
+                        return;
+                    };
 
                     if sender_user_room_data.has_user_already_reacted_to_message_event_id(&message_like_event.event_id().to_string()) {
                         debug!(sender = %format_args!("@{}:{}", sender.name, sender.url), event_id = %event.event_id(), "Sender already reacted to this message event");
@@ -208,10 +209,7 @@ impl EventHandler {
     }
 
     fn handle_sender_is_the_bot(&self, event: &AnySyncMessageLikeEvent) -> bool {
-        let sender_userdata = extract_userdata_from_string(event.sender().as_str());
-        if let Some(sender_userdata) = sender_userdata
-            && self.is_user_the_bot(&sender_userdata.0, &sender_userdata.1)
-        {
+        if self.is_user_the_bot(event.sender()) {
             trace!(event_id = %event.event_id(), "Received a message from the bot itself");
             return true;
         }
@@ -220,7 +218,7 @@ impl EventHandler {
 
     async fn handle_list(&self, room: &Room, stripped_body: &mut String) -> bool {
         if stripped_body == "!list" {
-            let answer = get_user_list_answer(&self.conn, room);
+            let answer = get_user_list_answer(&self.conn, room, &self.own_user_id);
             let content = RoomMessageEventContent::text_html(answer.text, answer.html);
             send_message(room, content).await;
             true;
@@ -327,7 +325,7 @@ impl EventHandler {
         }
     }
 
-    fn is_user_the_bot(&self, name: &str, url: &str) -> bool {
-        name == self.bot_username && url == self.homeserver_url_without_protocol
+    fn is_user_the_bot(&self, user_id: &UserId) -> bool {
+        user_id == self.own_user_id
     }
 }

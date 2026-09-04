@@ -1,56 +1,68 @@
 use std::sync::{Arc, Mutex};
 use matrix_sdk::Room;
-use regex::Regex;
+use matrix_sdk::ruma::{OwnedUserId, ServerName, UserId};
 use rusqlite::Connection;
 use crate::data::user::{find_all_users_with_room_data_in_db, find_user_in_db, insert_user, update_user, User, HtmlAndTextAnswer, UserType};
 use crate::data::user_room_data::{find_user_room_data_by_user_id_and_room_id, insert_user_room_data, UserRoomData};
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 
 pub fn compare_user(user1: &User, user2: &User) -> bool {
     user1.name == user2.name && user1.url == user2.url
 }
 
-pub fn extract_userdata_from_string(body: &str) -> Option<(String, String)> {
-    let re = Regex::new(r#"@(?P<username>[^:]+):(?P<domain>[^">]+)"#).unwrap();
-
-    if let Some(captures) = re.captures(body) {
-        let username = captures.name("username").unwrap().as_str().to_string();
-        let domain = captures.name("domain").unwrap().as_str().to_string();
-        return Some((username, domain));
-    }
-    None
+/// Split a Matrix user id into the two columns the `user` table stores.
+///
+/// The database predates this and keeps localpart and server name in separate columns, so
+/// this is the single place that maps between the two representations.
+pub fn split_user_id(user_id: &UserId) -> (String, String) {
+    (user_id.localpart().to_owned(), user_id.server_name().to_string())
 }
 
-pub fn setup_user(conn: &Arc<Mutex<Connection>>, room: Option<Room>, user_tag: &String, user_type: UserType, initial_social_credit: i32) -> Option<User> {
-    if let Some((username, domain)) = extract_userdata_from_string(user_tag) {
-        let user_opt = find_user_in_db(conn, &username, &domain);
-        let mut mut_user_opt = user_opt.clone().take();
-        if let Some(ref mut actual_user) = mut_user_opt {
-            setup_user_room_data_for_room(conn, room, actual_user, initial_social_credit);
-            return Some(actual_user.clone());
-        }
+/// Build a user id from an `ADMIN_USERNAME` value.
+///
+/// Accepts both a bare localpart (`alice`) and a full user id (`@alice:example.org`). A bare
+/// localpart is resolved against `server_name`, which must be the server name from the bot's
+/// own user id -- *not* the host of `MATRIX_HOMESERVER_URL`. With `.well-known` delegation
+/// those two differ (`matrix.example.org` vs `example.org`), and deriving the domain from the
+/// URL used to hand out an admin id that never matched a real user.
+pub fn resolve_configured_user_id(configured: &str, server_name: &ServerName) -> Option<OwnedUserId> {
+    let configured = configured.trim();
 
-        debug!(user = %user_tag, "User not found in db, creating new one");
-
-        let user = User {
-            id: -1,
-            name: username.clone(),
-            url: domain.clone(),
-            user_type,
-            room_data: None,
-        };
-
-        if insert_user(conn, &user).is_ok() {
-            let user_opt = find_user_in_db(conn, &username, &domain);
-            if user_opt.is_none() {
-                error!(user = %user_tag, "Failed to find user in db after inserting");
-                return None;
-            }
-            let mut mut_user = user_opt.unwrap();
-            setup_user_room_data_for_room(conn, room, &mut mut_user, initial_social_credit);
-            return Some(mut_user.clone());
-        }
+    if configured.starts_with('@') {
+        return UserId::parse(configured).ok();
     }
+
+    UserId::parse(format!("@{configured}:{server_name}")).ok()
+}
+
+pub fn setup_user(conn: &Arc<Mutex<Connection>>, room: Option<Room>, user_id: &UserId, user_type: UserType, initial_social_credit: i32) -> Option<User> {
+    let (username, domain) = split_user_id(user_id);
+
+    let user_opt = find_user_in_db(conn, &username, &domain);
+    if let Some(mut actual_user) = user_opt {
+        setup_user_room_data_for_room(conn, room, &mut actual_user, initial_social_credit);
+        return Some(actual_user);
+    }
+
+    debug!(user = %user_id, "User not found in db, creating new one");
+
+    let user = User {
+        id: -1,
+        name: username.clone(),
+        url: domain.clone(),
+        user_type,
+        room_data: None,
+    };
+
+    if insert_user(conn, &user).is_ok() {
+        let Some(mut inserted_user) = find_user_in_db(conn, &username, &domain) else {
+            error!(user = %user_id, "Failed to find user in db after inserting");
+            return None;
+        };
+        setup_user_room_data_for_room(conn, room, &mut inserted_user, initial_social_credit);
+        return Some(inserted_user);
+    }
+
     None
 }
 
@@ -83,22 +95,34 @@ fn setup_user_room_data_for_room(conn: &Arc<Mutex<Connection>>, room: Option<Roo
     }
 }
 
-pub fn initial_admin_user_setup(conn: &Arc<Mutex<Connection>>, username: &String, homeserver_url_relative: &str) {
-    let admin_user = find_user_in_db(&conn, &username, &homeserver_url_relative.to_string());
-    if admin_user.is_some() {
-        let mut admin_user = admin_user.unwrap();
-        if !matches!(admin_user.user_type, UserType::Admin) {
-            admin_user.user_type = UserType::Admin;
-            update_user(&conn, &admin_user).expect("Failed to update admin user");
+pub fn initial_admin_user_setup(conn: &Arc<Mutex<Connection>>, admin_user_id: &UserId) {
+    let (username, domain) = split_user_id(admin_user_id);
+
+    match find_user_in_db(conn, &username, &domain) {
+        Some(mut admin_user) => {
+            if !matches!(admin_user.user_type, UserType::Admin) {
+                admin_user.user_type = UserType::Admin;
+                update_user(conn, &admin_user).expect("Failed to update admin user");
+            }
+        }
+        None => {
+            // No room, so no room data is created here and the initial score is irrelevant.
+            setup_user(conn, None, admin_user_id, UserType::Admin, 0)
+                .expect("Failed to construct or register admin user");
         }
     }
-    else if admin_user.is_none() {
-        setup_user(&conn, None, &format!("@{}:{}", username, homeserver_url_relative), UserType::Admin, -1).expect("Failed to construct or register admin user");
-    }
+
+    info!(admin = %admin_user_id, "Admin user configured");
 }
 
-pub fn get_user_list_answer(conn: &Arc<Mutex<Connection>>, room: &Room) -> HtmlAndTextAnswer {
-    let users_opt = find_all_users_with_room_data_in_db(&conn, &room.room_id().to_string());
+pub fn get_user_list_answer(conn: &Arc<Mutex<Connection>>, room: &Room, own_user_id: &UserId) -> HtmlAndTextAnswer {
+    let (own_localpart, own_server) = split_user_id(own_user_id);
+    let users_opt = find_all_users_with_room_data_in_db(
+        conn,
+        &room.room_id().to_string(),
+        &own_localpart,
+        &own_server,
+    );
     let empty_answer = HtmlAndTextAnswer {
         html: String::from("No scores"),
         text: String::from("No Scores"),

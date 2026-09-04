@@ -20,7 +20,7 @@ use crate::data::user_reaction::{create_table_user_reaction};
 use crate::event_handler::EventHandler;
 use crate::utils::autojoin::on_stripped_state_member;
 use crate::utils::matrix_util::{Retryable, classify_error, log_retry_configuration, login_with_retry};
-use crate::utils::user_util::{initial_admin_user_setup};
+use crate::utils::user_util::{initial_admin_user_setup, resolve_configured_user_id};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -77,15 +77,8 @@ async fn main() -> anyhow::Result<()> {
     let admin_username = env::var("ADMIN_USERNAME").expect("ADMIN_USERNAME not set");
     let username = env::var("MATRIX_USERNAME").expect("MATRIX_USERNAME not set");
     let homeserver_url = env::var("MATRIX_HOMESERVER_URL").expect("MATRIX_HOMESERVER_URL not set");
-    let homeserver_url_relative : &str;
-    if homeserver_url.starts_with("https://") {
-        homeserver_url_relative = homeserver_url.strip_prefix("https://").expect("Failed to strip https:// from homeserver url");
-    }
-    else if homeserver_url.starts_with("http://") {
-        homeserver_url_relative = homeserver_url.strip_prefix("http://").expect("Failed to strip http:// from homeserver url");
-    }
-    else {
-        panic!("Invalid homeserver url");
+    if !homeserver_url.starts_with("https://") && !homeserver_url.starts_with("http://") {
+        panic!("MATRIX_HOMESERVER_URL must start with http:// or https://");
     }
     let password = env::var("MATRIX_PASSWORD").expect("MATRIX_PASSWORD not set");
 
@@ -127,21 +120,32 @@ async fn main() -> anyhow::Result<()> {
         login_retry_budget,
     )
     .await?;
-    info!(user_id = ?client.user_id(), "Logged in");
+
+    // Everything that needs to know who the bot is takes it from here. The homeserver is the
+    // authority on that; the host part of MATRIX_HOMESERVER_URL is not the server name when
+    // .well-known delegation is used.
+    let own_user_id = client
+        .user_id()
+        .expect("Logged in but the client has no user id")
+        .to_owned();
+    let server_name = own_user_id.server_name().to_owned();
+    info!(user_id = %own_user_id, "Logged in");
+
+    let admin_user_id = resolve_configured_user_id(&admin_username, &server_name)
+        .unwrap_or_else(|| panic!("ADMIN_USERNAME '{admin_username}' is not a valid Matrix user"));
 
     client.add_event_handler(on_stripped_state_member);
 
     let shared_conn = Arc::new(Mutex::new(conn));
     let event_handler = Arc::new(EventHandler::new(
         shared_conn.clone(),
-        username,
-        homeserver_url.clone(),
+        own_user_id,
         initial_social_credit,
         reaction_timespan,
         reaction_limit,
     ));
 
-    initial_admin_user_setup(&shared_conn, &admin_username, homeserver_url_relative);
+    initial_admin_user_setup(&shared_conn, &admin_user_id);
 
     client.add_event_handler({
         let event_handler = event_handler.clone();
