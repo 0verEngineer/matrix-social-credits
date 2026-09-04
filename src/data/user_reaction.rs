@@ -1,9 +1,10 @@
 use std::time::SystemTime;
-use rusqlite::Error;
 use tracing::error;
 
 #[derive(Clone)]
 pub struct UserReaction {
+    /// Row id. Kept so the struct mirrors the table; not read by the bot itself.
+    #[allow(dead_code)]
     pub id: i32,
     pub user_room_data_id: i32,
     pub time: SystemTime,
@@ -41,17 +42,6 @@ impl UserReaction {
         ).map_err(|err| err.to_string())?;
         Ok(())
     }
-}
-
-/// Deletes all reactions that are older than the given epoch time
-pub fn cleanup_table_user_reaction(conn: &rusqlite::Connection, epoch_time: i32) -> Result<(), rusqlite::Error> {
-    let sql = "DELETE FROM user_reaction WHERE time < ?1";
-
-    conn.execute(
-        sql,
-        [epoch_time]
-    )?;
-    Ok(())
 }
 
 pub fn create_table_user_reaction(conn: &rusqlite::Connection) {

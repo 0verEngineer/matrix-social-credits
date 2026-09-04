@@ -7,8 +7,8 @@ use matrix_sdk::ruma::{OwnedUserId, UserId};
 use rusqlite::Connection;
 use crate::data::emoji::{Emoji, delete_emoji, find_emoji_in_db, insert_emoji};
 use crate::data::event::{Event, find_event_in_db, insert_event};
-use crate::data::user::{update_user, User, UserType};
-use crate::data::user_room_data::update_user_room_data;
+use crate::data::user::{User, UserType};
+use crate::data::user_room_data::add_social_credit;
 use crate::utils::emoji_util::{get_emoji_list_answer, normalize_emoji};
 use crate::utils::matrix_util::send_message;
 use crate::utils::user_util::{compare_user, get_user_list_answer, setup_user};
@@ -141,16 +141,25 @@ impl EventHandler {
                         return;
                     }
 
-                    let mut recipient_room_data = recipient.room_data.unwrap();
+                    let recipient_room_data = recipient.room_data.take().unwrap();
                     let old_social_credit = recipient_room_data.social_credit;
-                    recipient_room_data.social_credit += emoji.social_credit;
-                    recipient.room_data = Some(recipient_room_data);
 
-                    // Update sender reactions
-                    self.update_user_in_db(&recipient);
-                    sender.room_data.unwrap().add_reaction(&self.conn, self.reaction_period_minutes, &message_like_event.event_id().to_string());
+                    let new_social_credit = match add_social_credit(
+                        &self.conn,
+                        recipient_room_data.user_id,
+                        &recipient_room_data.room_id,
+                        emoji.social_credit,
+                    ) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            error!(user = %recipient.name, %error, "Unable to update the social credit score");
+                            return;
+                        }
+                    };
 
-                    let text = format!("<b>{}</b> changed <b>{}'s</b> Social Credit Score using {} from <b>{}</b> to <b>{}</b>", sender.name, recipient.name, emoji.emoji, old_social_credit, recipient.room_data.unwrap().social_credit);
+                    sender.room_data.unwrap().add_reaction(&self.conn, &message_like_event.event_id().to_string());
+
+                    let text = format!("<b>{}</b> changed <b>{}'s</b> Social Credit Score using {} from <b>{}</b> to <b>{}</b>", sender.name, recipient.name, emoji.emoji, old_social_credit, new_social_credit);
                     send_message(&room, RoomMessageEventContent::text_html(text.clone(), text)).await;
                 }
             }
@@ -365,20 +374,6 @@ impl EventHandler {
             RoomMessageEventContent::text_plain(format!("Emoji removed: {emoji_text}")),
         )
         .await;
-    }
-
-    /// Update the user in the cache and the database, also updates the room data in the database
-    /// if the user has room_data
-    fn update_user_in_db(&self, user: &User) {
-        if user.room_data.is_some()
-            && update_user_room_data(&self.conn, &user.clone().room_data.unwrap()).is_err()
-        {
-            error!(user = %user.name, "Unable to update user room data in db");
-        }
-
-        if update_user(&self.conn, user).is_err() {
-            error!(user = %user.name, "Unable to update user in db");
-        }
     }
 
     fn is_user_the_bot(&self, user_id: &UserId) -> bool {

@@ -11,12 +11,7 @@ use matrix_sdk::Room;
 use matrix_sdk::config::RequestConfig;
 use matrix_sdk::ruma::events::AnySyncMessageLikeEvent;
 use std::sync::{Arc, Mutex};
-use rusqlite::{Connection};
-use crate::data::emoji::create_table_emoji;
-use crate::data::event::create_table_event;
-use crate::data::user::create_table_user;
-use crate::data::user_room_data::create_table_user_room_data;
-use crate::data::user_reaction::{create_table_user_reaction};
+use crate::data::migrations::{cleanup_events, open_and_migrate};
 use crate::event_handler::EventHandler;
 use crate::utils::autojoin::on_stripped_state_member;
 use crate::utils::matrix_util::{Retryable, classify_error, log_retry_configuration, login_with_retry};
@@ -56,6 +51,12 @@ const SYNC_TIMEOUT_SECS: u64 = 30;
 /// tight loop.
 const SYNC_ERROR_BACKOFF: Duration = Duration::from_secs(5);
 
+/// How long a deduplication marker in the `event` table is kept.
+const DEFAULT_EVENT_RETENTION_DAYS: u32 = 30;
+
+/// How often the retention job runs.
+const EVENT_CLEANUP_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+
 fn init_logging() {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(DEFAULT_LOG_FILTER));
@@ -92,14 +93,11 @@ async fn main() -> anyhow::Result<()> {
         DEFAULT_LOGIN_RETRY_BUDGET_SECS,
     ));
 
-    // Database setup
-    let conn = Connection::open(db_path)?;
-    conn.execute("PRAGMA foreign_keys = ON", []).expect("Failed to enable foreign key support");
-    create_table_user(&conn);
-    create_table_user_room_data(&conn);
-    create_table_user_reaction(&conn);
-    create_table_emoji(&conn);
-    create_table_event(&conn);
+    let event_retention_days =
+        optional_env_var("EVENT_RETENTION_DAYS", DEFAULT_EVENT_RETENTION_DAYS);
+
+    // Database setup, including the schema migrations and the connection pragmas.
+    let conn = open_and_migrate(&db_path)?;
 
     log_retry_configuration(http_retry_limit, http_max_retry_time);
     let client = Client::builder()
@@ -146,6 +144,7 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     initial_admin_user_setup(&shared_conn, &admin_user_id);
+    spawn_event_cleanup(shared_conn.clone(), event_retention_days);
 
     client.add_event_handler({
         let event_handler = event_handler.clone();
@@ -200,6 +199,37 @@ async fn run_sync_loop(client: &Client, sync_settings: SyncSettings) -> anyhow::
         .await?;
 
     Ok(())
+}
+
+/// Periodically drop old deduplication markers from the `event` table.
+///
+/// The table used to grow forever: every event the bot had ever seen stayed in it, and it is
+/// queried for every incoming event.
+fn spawn_event_cleanup(conn: Arc<Mutex<rusqlite::Connection>>, retention_days: u32) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(EVENT_CLEANUP_INTERVAL);
+
+        loop {
+            interval.tick().await;
+
+            let result = {
+                let connection = match conn.lock() {
+                    Ok(connection) => connection,
+                    Err(_) => {
+                        error!("Database mutex is poisoned, stopping the event cleanup");
+                        return;
+                    }
+                };
+                cleanup_events(&connection, retention_days)
+            };
+
+            match result {
+                Ok(0) => {}
+                Ok(removed) => info!(removed, retention_days, "Removed old event markers"),
+                Err(error) => warn!(%error, "Event cleanup failed"),
+            }
+        }
+    });
 }
 
 /// Resolve on SIGTERM (what `docker stop` sends) or Ctrl-C.

@@ -1,3 +1,4 @@
+pub mod migrations;
 pub mod user;
 pub mod emoji;
 pub mod event;

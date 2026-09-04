@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
-use rusqlite::{Connection, Error, params, Params, ToSql};
+use std::time::{SystemTime, UNIX_EPOCH};
+use rusqlite::{Connection, Error, params, Params};
 use tracing::{error, warn};
 
 #[derive(Clone)]
@@ -18,18 +19,16 @@ pub fn create_table_event(conn: &Connection) {
 }
 
 pub fn insert_event(conn: &Arc<Mutex<Connection>>, event: &Event) -> Result<(), Error> {
-    let sql = "INSERT INTO event (id, event_type, handled) VALUES (?1, ?2, ?3)";
+    // seen_at is what the retention job in data::migrations keys off.
+    let sql = "INSERT INTO event (id, event_type, handled, seen_at) VALUES (?1, ?2, ?3, ?4)";
+    let seen_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
 
     let connection = conn.lock().unwrap();
 
-    connection.execute(
-        sql,
-        &[
-            &event.id as &dyn ToSql,
-            &event.event_type as &dyn ToSql,
-            &event.handled as &dyn ToSql
-        ]
-    )?;
+    connection.execute(sql, params![&event.id, &event.event_type, &event.handled, seen_at])?;
 
     Ok(())
 }
@@ -38,7 +37,7 @@ pub fn find_event_in_db(
     conn: &Arc<Mutex<Connection>>,
     id: &String
 ) -> Option<Event> {
-    let sql = "SELECT * FROM event WHERE id=?1";
+    let sql = "SELECT id, event_type, handled FROM event WHERE id=?1";
     let params = params![id];
     match do_get_event_sql(conn, sql, params) {
         Ok(mut users) => {

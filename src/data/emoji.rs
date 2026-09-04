@@ -4,6 +4,8 @@ use tracing::error;
 
 #[derive(Clone)]
 pub struct Emoji {
+    /// Row id. Kept so the struct mirrors the table; not read by the bot itself.
+    #[allow(dead_code)]
     pub id: i32,
     pub room_id: String,
     pub emoji: String,

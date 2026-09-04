@@ -47,7 +47,7 @@ impl UserRoomData {
         self.reactions.iter().any(|reaction| reaction.message_event_id == *message_event_id)
     }
 
-    pub fn add_reaction(&mut self, conn: &Arc<Mutex<Connection>>, reaction_period_minutes: i32, message_event_id: &String) {
+    pub fn add_reaction(&mut self, conn: &Arc<Mutex<Connection>>, message_event_id: &String) {
         let now = SystemTime::now();
         let reaction = UserReaction::new(self.id, now, message_event_id.clone());
         self.reactions.push(reaction.clone());
@@ -56,17 +56,11 @@ impl UserRoomData {
             error!("Failed to insert user reaction");
         }
 
-        // todo configurable (weekly) db cleanup
-        /*
-        let reaction_period_duration = Duration::from_secs((reaction_period_minutes * 60) as u64);
-        let prev = now - reaction_period_duration;
-        self.last_reactions.retain(|reaction| now.duration_since(reaction.time).unwrap_or(Duration::from_secs(0)) <= reaction_period_duration);
-        if cleanup_table_user_reaction(
-            &conn.lock().unwrap(),
-            prev.duration_since(SystemTime::UNIX_EPOCH).unwrap_or(Duration::from_secs(0)).as_secs() as i32).is_err()
-        {
-            error!("Failed to cleanup user reactions");
-        }*/
+        // user_reaction rows are kept indefinitely on purpose. The table serves two
+        // purposes at once: the cooldown window, which only looks at recent rows, and the
+        // "has this user already reacted to this message" check, which has to remember every
+        // reaction. A time based cleanup would quietly break the second one and let old
+        // messages be scored again. The rows are tiny and indexed.
     }
 }
 
@@ -95,20 +89,24 @@ pub fn insert_user_room_data(conn: &Arc<Mutex<Connection>>, user_room_data: &Use
     Ok(())
 }
 
-pub fn update_user_room_data(conn: &Arc<Mutex<Connection>>, user_room_data: &UserRoomData) -> Result<(), Error> {
-    let sql = "UPDATE user_room_data SET social_credit=?1 WHERE user_id=?2 AND room_id=?3";
+/// Add `delta` to a user's score in one statement and return the new value.
+///
+/// The previous flow read the score, added the emoji value in Rust and wrote the result back
+/// with `SET social_credit = ?`. Event handlers run concurrently, so two reactions landing at
+/// the same time read the same starting value and one of the two changes was lost. Letting
+/// SQLite do the arithmetic removes the read-modify-write window.
+pub fn add_social_credit(
+    conn: &Arc<Mutex<Connection>>,
+    user_id: i32,
+    room_id: &str,
+    delta: i32,
+) -> Result<i32, Error> {
+    let sql = "UPDATE user_room_data SET social_credit = social_credit + ?1 \
+               WHERE user_id = ?2 AND room_id = ?3 \
+               RETURNING social_credit";
     let connection = conn.lock().unwrap();
 
-    connection.execute(
-        sql,
-        params![
-            &user_room_data.social_credit,
-            &user_room_data.user_id,
-            &user_room_data.room_id,
-        ]
-    )?;
-
-    Ok(())
+    connection.query_row(sql, params![delta, user_id, room_id], |row| row.get(0))
 }
 
 pub fn find_user_room_data_by_user_id_and_room_id(conn: &Arc<Mutex<Connection>>, user_id: i32, room_id: &String) -> Result<UserRoomData, Error> {

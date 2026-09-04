@@ -80,7 +80,7 @@ pub fn find_user_in_db(
     conn: &Arc<Mutex<Connection>>,
     name: &String, url: &String
 ) -> Option<User> {
-    let sql = "SELECT * FROM user WHERE name=?1 AND url=?2";
+    let sql = "SELECT id, name, url, user_type FROM user WHERE name=?1 AND url=?2";
     let params = params![name, url];
     match do_get_user_sql(conn, sql, params) {
         Ok(mut users) => {
