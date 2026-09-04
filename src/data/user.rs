@@ -175,3 +175,87 @@ fn do_get_user_sql_inner<P: Params>(params: P, stmt: &mut Statement, with_room_d
     }).and_then(|mapped_rows| mapped_rows.collect());
     users
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{User, UserType, find_all_users_with_room_data_in_db, find_user_in_db, insert_user, update_user};
+    use crate::data::user_room_data::{UserRoomData, insert_user_room_data};
+    use crate::test_support::test_db;
+
+    const ROOM: &str = "!room:example.org";
+
+    fn user(name: &str) -> User {
+        User {
+            id: -1,
+            name: name.to_owned(),
+            url: "example.org".to_owned(),
+            user_type: UserType::Default,
+            room_data: None,
+        }
+    }
+
+    #[test]
+    fn inserts_and_finds_a_user() {
+        let db = test_db();
+        insert_user(&db, &user("alice")).unwrap();
+
+        let found = find_user_in_db(&db, &"alice".to_owned(), &"example.org".to_owned()).unwrap();
+
+        assert_eq!(found.name, "alice");
+        assert!(matches!(found.user_type, UserType::Default));
+    }
+
+    #[test]
+    fn promotes_a_user_to_admin() {
+        let db = test_db();
+        insert_user(&db, &user("alice")).unwrap();
+        let mut found = find_user_in_db(&db, &"alice".to_owned(), &"example.org".to_owned()).unwrap();
+
+        found.user_type = UserType::Admin;
+        update_user(&db, &found).unwrap();
+
+        let reloaded = find_user_in_db(&db, &"alice".to_owned(), &"example.org".to_owned()).unwrap();
+        assert!(matches!(reloaded.user_type, UserType::Admin));
+    }
+
+    /// The bot used to be filtered out by the hardcoded name "social-credit-system", which
+    /// stopped working as soon as the account was called something else.
+    #[test]
+    fn the_listing_excludes_the_bot_by_its_own_user_id() {
+        let db = test_db();
+        for name in ["alice", "some-other-bot-name"] {
+            insert_user(&db, &user(name)).unwrap();
+            let stored = find_user_in_db(&db, &name.to_owned(), &"example.org".to_owned()).unwrap();
+            insert_user_room_data(
+                &db,
+                &UserRoomData { id: -1, user_id: stored.id, room_id: ROOM.to_owned(), social_credit: 250 },
+            )
+            .unwrap();
+        }
+
+        let listed =
+            find_all_users_with_room_data_in_db(&db, &ROOM.to_owned(), "some-other-bot-name", "example.org")
+                .unwrap();
+
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "alice");
+    }
+
+    #[test]
+    fn the_listing_is_scoped_to_a_room() {
+        let db = test_db();
+        insert_user(&db, &user("alice")).unwrap();
+        let stored = find_user_in_db(&db, &"alice".to_owned(), &"example.org".to_owned()).unwrap();
+        insert_user_room_data(
+            &db,
+            &UserRoomData { id: -1, user_id: stored.id, room_id: ROOM.to_owned(), social_credit: 250 },
+        )
+        .unwrap();
+
+        let listed =
+            find_all_users_with_room_data_in_db(&db, &"!other:example.org".to_owned(), "bot", "example.org")
+                .unwrap();
+
+        assert!(listed.is_empty());
+    }
+}

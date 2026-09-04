@@ -1,6 +1,8 @@
 mod event_handler;
 mod data;
 mod utils;
+#[cfg(test)]
+mod test_support;
 
 use std::env;
 use std::time::Duration;

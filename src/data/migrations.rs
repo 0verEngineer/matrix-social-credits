@@ -43,7 +43,10 @@ pub fn open_and_migrate(path: impl AsRef<Path>) -> Result<Connection, Error> {
     Ok(conn)
 }
 
-fn migrate(conn: &Connection) -> Result<(), Error> {
+/// Bring the schema of an already opened connection up to date.
+///
+/// Split out from [`open_and_migrate`] so the tests can run it against an in-memory database.
+pub fn migrate(conn: &Connection) -> Result<(), Error> {
     let mut version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
 
     if version > SCHEMA_VERSION {
@@ -183,3 +186,147 @@ fn now_epoch_secs() -> i64 {
         .unwrap_or(0)
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{legacy_db, test_db};
+
+    fn count(conn: &Connection, table: &str) -> i64 {
+        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0)).unwrap()
+    }
+
+    #[test]
+    fn a_fresh_database_ends_up_at_the_current_version() {
+        let db = test_db();
+        let conn = db.lock().unwrap();
+        let version: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn user_name_and_url_are_unique() {
+        let db = test_db();
+        let conn = db.lock().unwrap();
+        conn.execute("INSERT INTO user (name, url, user_type) VALUES ('a', 'b', 0)", []).unwrap();
+        assert!(
+            conn.execute("INSERT INTO user (name, url, user_type) VALUES ('a', 'b', 0)", []).is_err(),
+            "a second user with the same name and url must be rejected"
+        );
+    }
+
+    #[test]
+    fn an_emoji_can_only_be_registered_once_per_room() {
+        let db = test_db();
+        let conn = db.lock().unwrap();
+        conn.execute("INSERT INTO emoji (room_id, emoji, social_credit) VALUES ('!r', '😑', -25)", []).unwrap();
+        assert!(
+            conn.execute("INSERT INTO emoji (room_id, emoji, social_credit) VALUES ('!r', '😑', 5)", []).is_err()
+        );
+        // ... but the same emoji in a different room is fine.
+        conn.execute("INSERT INTO emoji (room_id, emoji, social_credit) VALUES ('!other', '😑', 5)", []).unwrap();
+    }
+
+    /// The production database had no uniqueness at all, and setup_user's
+    /// find-insert-find is not atomic -- the old code even logged "Multiple users found".
+    #[test]
+    fn migration_merges_duplicate_users_and_repoints_their_rows() {
+        let conn = legacy_db();
+        conn.execute_batch(
+            "
+            INSERT INTO user (id, name, url, user_type) VALUES (1,'alice','example.org',0), (2,'alice','example.org',0), (3,'bob','example.org',2);
+            INSERT INTO user_room_data (id, user_id, room_id, social_credit) VALUES (10,1,'!r',250), (11,2,'!r',300), (12,3,'!r',400);
+            INSERT INTO user_reaction (id, user_room_data_id, time, message_event_id) VALUES (100,10,1700000000,'$m1'), (101,11,1700000100,'$m1'), (102,11,1700000200,'$m2'), (103,12,1700000300,'$m3');
+            ",
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        assert_eq!(count(&conn, "user"), 2, "the duplicated alice must be merged away");
+        assert_eq!(count(&conn, "user_room_data"), 2);
+        // $m1 was recorded twice for what turned out to be the same user.
+        assert_eq!(count(&conn, "user_reaction"), 3);
+
+        let surviving_user: i32 =
+            conn.query_row("SELECT user_id FROM user_room_data WHERE room_id='!r' AND social_credit=250", [], |r| r.get(0)).unwrap();
+        assert_eq!(surviving_user, 1, "room data must point at the surviving user");
+
+        let orphans: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM user_reaction r LEFT JOIN user_room_data d ON r.user_room_data_id = d.id WHERE d.id IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphans, 0, "no reaction may be left pointing at a deleted row");
+    }
+
+    /// Entries registered before normalization existed carry variation selectors or skin
+    /// tones and would never match an incoming reaction again.
+    #[test]
+    fn migration_normalizes_and_deduplicates_stored_emojis() {
+        let conn = legacy_db();
+        conn.execute_batch(
+            "
+            INSERT INTO emoji (id, room_id, emoji, social_credit) VALUES (1,'!r','😑\u{fe0f}',-25), (2,'!r','😑',-25), (3,'!r','👍🏽',10);
+            ",
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let stored: Vec<String> = {
+            let mut stmt = conn.prepare("SELECT emoji FROM emoji ORDER BY id").unwrap();
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0)).unwrap();
+            rows.map(|r| r.unwrap()).collect()
+        };
+        assert_eq!(stored, vec!["😑".to_owned(), "👍".to_owned()]);
+    }
+
+    #[test]
+    fn migration_is_idempotent() {
+        let conn = legacy_db();
+        conn.execute("INSERT INTO user (id, name, url, user_type) VALUES (1,'a','b',0)", []).unwrap();
+
+        migrate(&conn).unwrap();
+        migrate(&conn).unwrap();
+
+        assert_eq!(count(&conn, "user"), 1);
+        let version: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn existing_event_rows_survive_the_first_retention_run() {
+        let conn = legacy_db();
+        conn.execute("INSERT INTO event (id, event_type, handled) VALUES ('$e1','m.reaction',1)", []).unwrap();
+
+        migrate(&conn).unwrap();
+        cleanup_events(&conn, 30).unwrap();
+
+        assert_eq!(count(&conn, "event"), 1, "seen_at must be backfilled, not left at 0");
+    }
+
+    #[test]
+    fn retention_drops_old_markers_and_keeps_recent_ones() {
+        let db = test_db();
+        let conn = db.lock().unwrap();
+        let now = now_epoch_secs();
+        conn.execute(
+            "INSERT INTO event (id, event_type, handled, seen_at) VALUES ('$old','m.reaction',1,?1)",
+            params![now - 60 * 24 * 60 * 60],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO event (id, event_type, handled, seen_at) VALUES ('$new','m.reaction',1,?1)",
+            params![now],
+        )
+        .unwrap();
+
+        let removed = cleanup_events(&conn, 30).unwrap();
+
+        assert_eq!(removed, 1);
+        assert_eq!(count(&conn, "event"), 1);
+    }
+}

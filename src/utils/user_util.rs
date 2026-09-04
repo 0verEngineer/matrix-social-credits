@@ -226,3 +226,98 @@ async fn current_room_members(room: &Room) -> Option<HashSet<(String, String)>> 
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use matrix_sdk::ruma::{ServerName, user_id};
+
+    use super::{resolve_configured_user_id, split_user_id};
+
+    #[test]
+    fn splits_a_user_id_into_the_stored_columns() {
+        assert_eq!(
+            split_user_id(user_id!("@alice:example.org")),
+            ("alice".to_owned(), "example.org".to_owned())
+        );
+    }
+
+    #[test]
+    fn resolves_a_bare_localpart_against_the_server_name() {
+        let server = ServerName::parse("example.org").unwrap();
+        assert_eq!(
+            resolve_configured_user_id("alice", &server).unwrap(),
+            user_id!("@alice:example.org")
+        );
+    }
+
+    /// The server name in a user id is not the host of MATRIX_HOMESERVER_URL. With
+    /// .well-known delegation the URL is https://matrix.example.org while ids read
+    /// @alice:example.org -- deriving the domain from the URL produced an admin id that never
+    /// matched anybody.
+    #[test]
+    fn uses_the_server_name_not_the_homeserver_host() {
+        let server = ServerName::parse("example.org").unwrap();
+        let resolved = resolve_configured_user_id("alice", &server).unwrap();
+        assert_eq!(resolved.server_name().as_str(), "example.org");
+    }
+
+    #[test]
+    fn accepts_a_full_user_id_on_another_server() {
+        let server = ServerName::parse("example.org").unwrap();
+        assert_eq!(
+            resolve_configured_user_id("@bob:other.example", &server).unwrap(),
+            user_id!("@bob:other.example")
+        );
+    }
+
+    #[test]
+    fn ignores_surrounding_whitespace() {
+        let server = ServerName::parse("example.org").unwrap();
+        assert_eq!(
+            resolve_configured_user_id("  alice  ", &server).unwrap(),
+            user_id!("@alice:example.org")
+        );
+    }
+
+    #[test]
+    fn rejects_something_that_is_not_a_user_id() {
+        let server = ServerName::parse("example.org").unwrap();
+        assert!(resolve_configured_user_id("@not a user:", &server).is_none());
+    }
+}
+
+#[cfg(test)]
+mod db_tests {
+    use matrix_sdk::ruma::user_id;
+
+    use super::setup_user;
+    use crate::data::user::UserType;
+    use crate::test_support::test_db;
+
+    /// setup_user does a non-atomic find, insert, find. Calling it twice must not end up with
+    /// two rows for the same person -- which is what the "Multiple users found" log line in
+    /// the old code was about.
+    #[test]
+    fn setting_up_the_same_user_twice_keeps_one_row() {
+        let db = test_db();
+
+        let first = setup_user(&db, None, user_id!("@alice:example.org"), UserType::Default, 250).unwrap();
+        let second = setup_user(&db, None, user_id!("@alice:example.org"), UserType::Default, 250).unwrap();
+
+        assert_eq!(first.id, second.id);
+
+        let conn = db.lock().unwrap();
+        let users: i64 = conn.query_row("SELECT COUNT(*) FROM user", [], |r| r.get(0)).unwrap();
+        assert_eq!(users, 1);
+    }
+
+    #[test]
+    fn stores_the_localpart_and_the_server_name_separately() {
+        let db = test_db();
+
+        let created = setup_user(&db, None, user_id!("@alice:example.org"), UserType::Default, 250).unwrap();
+
+        assert_eq!(created.name, "alice");
+        assert_eq!(created.url, "example.org");
+    }
+}

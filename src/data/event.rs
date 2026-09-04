@@ -78,3 +78,42 @@ fn do_get_event_sql<P: Params>(
     return events;
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::{Event, find_event_in_db, insert_event};
+    use crate::test_support::test_db;
+
+    fn event(id: &str) -> Event {
+        Event { id: id.to_owned(), event_type: "m.reaction".to_owned(), handled: true }
+    }
+
+    #[test]
+    fn records_and_finds_a_handled_event() {
+        let db = test_db();
+        insert_event(&db, &event("$e1")).unwrap();
+
+        assert!(find_event_in_db(&db, &"$e1".to_owned()).is_some());
+        assert!(find_event_in_db(&db, &"$e2".to_owned()).is_none());
+    }
+
+    /// The deduplication depends on the second insert failing.
+    #[test]
+    fn the_same_event_cannot_be_recorded_twice() {
+        let db = test_db();
+        insert_event(&db, &event("$e1")).unwrap();
+
+        assert!(insert_event(&db, &event("$e1")).is_err());
+    }
+
+    #[test]
+    fn a_recorded_event_carries_a_timestamp_for_the_retention_job() {
+        let db = test_db();
+        insert_event(&db, &event("$e1")).unwrap();
+
+        let conn = db.lock().unwrap();
+        let seen_at: i64 =
+            conn.query_row("SELECT seen_at FROM event WHERE id = '$e1'", [], |r| r.get(0)).unwrap();
+        assert!(seen_at > 0);
+    }
+}

@@ -179,3 +179,132 @@ pub fn find_user_room_data_by_user_id_and_room_id(conn: &Arc<Mutex<Connection>>,
         Err(Error::QueryReturnedNoRows)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, SystemTime};
+
+    use super::{UserRoomData, add_social_credit, find_user_room_data_by_user_id_and_room_id, insert_user_room_data};
+    use crate::data::user_reaction::insert_user_reaction;
+    use crate::test_support::test_db;
+    use std::sync::{Arc, Mutex};
+    use rusqlite::Connection;
+
+    const ROOM: &str = "!room:example.org";
+
+    fn seed(db: &Arc<Mutex<Connection>>) -> UserRoomData {
+        {
+            let conn = db.lock().unwrap();
+            conn.execute("INSERT INTO user (id, name, url, user_type) VALUES (1,'alice','example.org',0)", [])
+                .unwrap();
+        }
+        insert_user_room_data(
+            db,
+            &UserRoomData { id: -1, user_id: 1, room_id: ROOM.to_owned(), social_credit: 250 },
+        )
+        .unwrap();
+        find_user_room_data_by_user_id_and_room_id(db, 1, &ROOM.to_owned()).unwrap()
+    }
+
+    fn record_reaction(db: &Arc<Mutex<Connection>>, room_data: &UserRoomData, minutes_ago: u64, message: &str) {
+        let when = SystemTime::now() - Duration::from_secs(minutes_ago * 60);
+        let conn = db.lock().unwrap();
+        insert_user_reaction(&conn, room_data.id, when, message).unwrap();
+    }
+
+    #[test]
+    fn no_cooldown_below_the_limit() {
+        let db = test_db();
+        let room_data = seed(&db);
+        record_reaction(&db, &room_data, 1, "$m1");
+
+        assert_eq!(room_data.get_time_till_user_can_react(&db, 20, 2), 0);
+    }
+
+    /// With a limit of 2 over 20 minutes and reactions at t=0 and t=19, the user may react
+    /// again at t=20. The old code measured from the newest reaction and reported t=39.
+    #[test]
+    fn the_wait_is_measured_from_the_oldest_reaction_in_the_window() {
+        let db = test_db();
+        let room_data = seed(&db);
+        record_reaction(&db, &room_data, 19, "$m1");
+        record_reaction(&db, &room_data, 0, "$m2");
+
+        let remaining = room_data.get_time_till_user_can_react(&db, 20, 2);
+
+        assert!(remaining > 0, "the limit is reached, so there has to be a wait");
+        assert!(
+            (30..=70).contains(&remaining),
+            "expected roughly one minute left, got {remaining}s"
+        );
+    }
+
+    #[test]
+    fn reactions_outside_the_window_do_not_count() {
+        let db = test_db();
+        let room_data = seed(&db);
+        record_reaction(&db, &room_data, 120, "$m1");
+        record_reaction(&db, &room_data, 90, "$m2");
+
+        assert_eq!(room_data.get_time_till_user_can_react(&db, 20, 2), 0);
+    }
+
+    /// A timestamp in the future is possible after an NTP step or a container moving hosts.
+    /// The previous implementation called duration_since(..).unwrap() and panicked.
+    #[test]
+    fn a_reaction_in_the_future_does_not_panic() {
+        let db = test_db();
+        let room_data = seed(&db);
+        {
+            let conn = db.lock().unwrap();
+            let future = SystemTime::now() + Duration::from_secs(3600);
+            insert_user_reaction(&conn, room_data.id, future, "$m1").unwrap();
+            insert_user_reaction(&conn, room_data.id, future, "$m2").unwrap();
+        }
+
+        let remaining = room_data.get_time_till_user_can_react(&db, 20, 2);
+
+        assert!((0..=20 * 60).contains(&remaining), "unexpected wait {remaining}s");
+    }
+
+    #[test]
+    fn a_limit_of_zero_disables_the_cooldown() {
+        let db = test_db();
+        let room_data = seed(&db);
+        record_reaction(&db, &room_data, 0, "$m1");
+
+        assert_eq!(room_data.get_time_till_user_can_react(&db, 20, 0), 0);
+    }
+
+    #[test]
+    fn already_reacted_only_matches_the_same_message() {
+        let db = test_db();
+        let mut room_data = seed(&db);
+        room_data.add_reaction(&db, "$m1");
+
+        assert!(room_data.has_user_already_reacted_to_message_event_id(&db, "$m1"));
+        assert!(!room_data.has_user_already_reacted_to_message_event_id(&db, "$m2"));
+    }
+
+    /// Event handlers run concurrently. Reading the score, adding in Rust and writing the
+    /// result back lost one of two simultaneous changes.
+    #[test]
+    fn the_score_update_is_additive() {
+        let db = test_db();
+        let room_data = seed(&db);
+
+        assert_eq!(add_social_credit(&db, room_data.user_id, ROOM, -25).unwrap(), 225);
+        assert_eq!(add_social_credit(&db, room_data.user_id, ROOM, 10).unwrap(), 235);
+
+        let reloaded = find_user_room_data_by_user_id_and_room_id(&db, 1, &ROOM.to_owned()).unwrap();
+        assert_eq!(reloaded.social_credit, 235);
+    }
+
+    #[test]
+    fn updating_a_missing_row_is_an_error_rather_than_a_silent_no_op() {
+        let db = test_db();
+        seed(&db);
+
+        assert!(add_social_credit(&db, 1, "!other:example.org", 10).is_err());
+    }
+}

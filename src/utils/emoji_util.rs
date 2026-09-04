@@ -70,3 +70,53 @@ pub fn get_emoji_list_answer(conn: &Arc<Mutex<Connection>>, room: &Room) -> Html
         html: format!("<h3>Registered Emojis:</h3>{}", html_entries.join("<br>")),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_emoji;
+
+    #[test]
+    fn leaves_a_plain_emoji_alone() {
+        assert_eq!(normalize_emoji("😑"), "😑");
+    }
+
+    #[test]
+    fn strips_a_trailing_variation_selector() {
+        assert_eq!(normalize_emoji("😑\u{fe0f}"), "😑");
+    }
+
+    /// The old lookup only stripped VS16 when the string *ended* with it, so a selector in
+    /// the middle of a sequence survived and the entry never matched.
+    #[test]
+    fn strips_a_variation_selector_in_the_middle() {
+        assert_eq!(normalize_emoji("\u{2764}\u{fe0f}\u{200d}\u{1f525}"), "\u{2764}\u{200d}\u{1f525}");
+    }
+
+    #[test]
+    fn strips_the_text_presentation_selector() {
+        assert_eq!(normalize_emoji("\u{2764}\u{fe0e}"), "\u{2764}");
+    }
+
+    #[test]
+    fn strips_skin_tone_modifiers() {
+        assert_eq!(normalize_emoji("👍🏽"), "👍");
+        assert_eq!(normalize_emoji("👍🏻"), normalize_emoji("👍🏿"));
+    }
+
+    #[test]
+    fn trims_surrounding_whitespace() {
+        assert_eq!(normalize_emoji("  😑 "), "😑");
+    }
+
+    /// Registration and lookup have to agree; this is the case that used to silently produce
+    /// an entry that could never be found again.
+    #[test]
+    fn registration_and_lookup_agree() {
+        assert_eq!(normalize_emoji("😑\u{fe0f}"), normalize_emoji("😑"));
+    }
+
+    #[test]
+    fn an_empty_input_stays_empty() {
+        assert_eq!(normalize_emoji("   "), "");
+    }
+}

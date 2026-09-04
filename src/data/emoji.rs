@@ -98,3 +98,55 @@ pub fn delete_emoji(conn: &Arc<Mutex<Connection>>, emoji: &String, room_id: &Str
 
     connection.execute(sql, params![emoji, room_id])
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Emoji, delete_emoji, find_all_emoji_for_room_in_db, find_emoji_in_db, insert_emoji};
+    use crate::test_support::test_db;
+
+    fn emoji(room: &str, symbol: &str, credit: i32) -> Emoji {
+        Emoji { id: -1, room_id: room.to_owned(), emoji: symbol.to_owned(), social_credit: credit }
+    }
+
+    #[test]
+    fn registers_and_finds_an_emoji() {
+        let db = test_db();
+        insert_emoji(&db, &emoji("!r", "😑", -25)).unwrap();
+
+        let found = find_emoji_in_db(&db, &"😑".to_owned(), &"!r".to_owned()).unwrap();
+
+        assert_eq!(found.social_credit, -25);
+    }
+
+    #[test]
+    fn emojis_are_scoped_to_a_room() {
+        let db = test_db();
+        insert_emoji(&db, &emoji("!r", "😑", -25)).unwrap();
+
+        assert!(find_emoji_in_db(&db, &"😑".to_owned(), &"!other".to_owned()).is_none());
+    }
+
+    #[test]
+    fn unregistering_removes_only_that_rooms_entry() {
+        let db = test_db();
+        insert_emoji(&db, &emoji("!r", "😑", -25)).unwrap();
+        insert_emoji(&db, &emoji("!other", "😑", -25)).unwrap();
+
+        assert_eq!(delete_emoji(&db, &"😑".to_owned(), &"!r".to_owned()).unwrap(), 1);
+
+        assert!(find_emoji_in_db(&db, &"😑".to_owned(), &"!r".to_owned()).is_none());
+        assert!(find_emoji_in_db(&db, &"😑".to_owned(), &"!other".to_owned()).is_some());
+    }
+
+    #[test]
+    fn lists_every_emoji_of_a_room() {
+        let db = test_db();
+        insert_emoji(&db, &emoji("!r", "😑", -25)).unwrap();
+        insert_emoji(&db, &emoji("!r", "👍", 10)).unwrap();
+        insert_emoji(&db, &emoji("!other", "🎉", 1)).unwrap();
+
+        let listed = find_all_emoji_for_room_in_db(&db, &"!r".to_owned()).unwrap();
+
+        assert_eq!(listed.len(), 2);
+    }
+}

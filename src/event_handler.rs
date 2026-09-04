@@ -229,8 +229,7 @@ impl EventHandler {
     /// but every one of them ended in `true;` -- a statement, not a return value -- so they
     /// all returned `false` and none of those early returns ever fired.
     async fn handle_command(&self, room: &Room, sender: &User, body: &str) {
-        let command = body.split_whitespace().next().unwrap_or_default();
-        let arguments = body[command.len()..].trim();
+        let (command, arguments) = split_command(body);
 
         match command {
             "!help" => self.handle_help(room).await,
@@ -435,5 +434,47 @@ impl EventHandler {
 
     fn is_user_the_bot(&self, user_id: &UserId) -> bool {
         user_id == self.own_user_id
+    }
+}
+
+/// Split a message body into the command word and everything after it.
+fn split_command(body: &str) -> (&str, &str) {
+    let body = body.trim();
+    let command = body.split_whitespace().next().unwrap_or_default();
+    (command, body[command.len()..].trim())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_command;
+
+    #[test]
+    fn splits_a_command_without_arguments() {
+        assert_eq!(split_command("!list"), ("!list", ""));
+    }
+
+    /// Mobile clients like to append a space; the previous `stripped_body == "!list"`
+    /// comparison did not match then.
+    #[test]
+    fn tolerates_surrounding_whitespace() {
+        assert_eq!(split_command("  !list  "), ("!list", ""));
+    }
+
+    #[test]
+    fn keeps_the_arguments() {
+        assert_eq!(split_command("!register_emoji 😑 -25"), ("!register_emoji", "😑 -25"));
+    }
+
+    /// split(" ") plus a "drop a leading empty part" special case broke on this.
+    #[test]
+    fn tolerates_several_spaces_between_the_arguments() {
+        let (_, arguments) = split_command("!register_emoji   😑    -25");
+        let parts: Vec<&str> = arguments.split_whitespace().collect();
+        assert_eq!(parts, vec!["😑", "-25"]);
+    }
+
+    #[test]
+    fn an_empty_body_yields_an_empty_command() {
+        assert_eq!(split_command("   "), ("", ""));
     }
 }
