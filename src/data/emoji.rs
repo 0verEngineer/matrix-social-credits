@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 use rusqlite::{Connection, Error, params, Params};
+use tracing::error;
 
 #[derive(Clone)]
 pub struct Emoji {
@@ -45,7 +46,7 @@ pub fn find_emoji_in_db(conn: &Arc<Mutex<Connection>>, emoji: &String, room_id: 
             None
         },
         Err(e) => {
-            println!("Database error: {}", e);
+            error!(error = %e, "Database error");
             None
         },
     }
@@ -57,7 +58,7 @@ pub fn find_all_emoji_for_room_in_db(conn: &Arc<Mutex<Connection>>, room_id: &St
     match do_get_emoji_sql(conn, sql, params) {
         Ok(emoji) => Some(emoji),
         Err(e) => {
-            println!("Database error: {}", e);
+            error!(error = %e, "Database error");
             None
         },
     }
@@ -72,7 +73,7 @@ fn do_get_emoji_sql<P:Params>(
     let mut stmt = match connection.prepare(&sql) {
         Ok(stmt) => stmt,
         Err(e) => {
-            println!("Database error: {}", e);
+            error!(error = %e, "Database error");
             return Err(e);
         }
     };

@@ -4,6 +4,7 @@ use regex::Regex;
 use rusqlite::Connection;
 use crate::data::user::{find_all_users_with_room_data_in_db, find_user_in_db, insert_user, update_user, User, HtmlAndTextAnswer, UserType};
 use crate::data::user_room_data::{find_user_room_data_by_user_id_and_room_id, insert_user_room_data, UserRoomData};
+use tracing::{debug, error};
 
 pub fn compare_user(user1: &User, user2: &User) -> bool {
     user1.name == user2.name && user1.url == user2.url
@@ -29,7 +30,7 @@ pub fn setup_user(conn: &Arc<Mutex<Connection>>, room: Option<Room>, user_tag: &
             return Some(actual_user.clone());
         }
 
-        println!("User {} not found in db, creating new one", user_tag); // debug level
+        debug!(user = %user_tag, "User not found in db, creating new one");
 
         let user = User {
             id: -1,
@@ -42,7 +43,7 @@ pub fn setup_user(conn: &Arc<Mutex<Connection>>, room: Option<Room>, user_tag: &
         if insert_user(conn, &user).is_ok() {
             let user_opt = find_user_in_db(conn, &username, &domain);
             if user_opt.is_none() {
-                println!("Failed to find user in db after inserting");
+                error!(user = %user_tag, "Failed to find user in db after inserting");
                 return None;
             }
             let mut mut_user = user_opt.unwrap();
@@ -64,7 +65,7 @@ fn setup_user_room_data_for_room(conn: &Arc<Mutex<Connection>>, room: Option<Roo
         }
 
         let room_id = room.room_id().to_string();
-        println!("Room data for user {} and room {} not found in db, creating", user.name, room_id); // debug level
+        debug!(user = %user.name, %room_id, "Room data for user not found in db, creating");
 
         let room_data = UserRoomData {
             id: -1,
@@ -75,7 +76,7 @@ fn setup_user_room_data_for_room(conn: &Arc<Mutex<Connection>>, room: Option<Roo
         };
 
         if insert_user_room_data(conn, &room_data).is_err() {
-            println!("Failed to insert room data for user {}", user.name);
+            error!(user = %user.name, "Failed to insert room data for user");
         }
 
         user.room_data = Some(room_data);

@@ -1,5 +1,6 @@
 use std::time::SystemTime;
 use rusqlite::Error;
+use tracing::error;
 
 #[derive(Clone)]
 pub struct UserReaction {
@@ -24,7 +25,7 @@ impl UserReaction {
         let duration_since_epoch_opt = self.time.duration_since(SystemTime::UNIX_EPOCH);
         if duration_since_epoch_opt.is_err() {
             let msg = "Failed to convert reaction time to epoch seconds";
-            println!("{}", msg);
+            error!("{}", msg);
             return Err(msg.to_string());
         }
         // rusqlite 0.40 no longer implements ToSql for u64, SQLite integers are i64 anyway.

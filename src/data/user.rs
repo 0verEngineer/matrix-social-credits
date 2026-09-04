@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 use rusqlite::{Connection, Error, params, Params, Statement, ToSql};
 use crate::data::user_reaction::{get_user_reactions, UserReaction};
 use crate::data::user_room_data::UserRoomData;
+use tracing::{error, warn};
 
 #[derive(Clone)]
 pub enum UserType {
@@ -84,12 +85,12 @@ pub fn find_user_in_db(
     match do_get_user_sql(conn, sql, params) {
         Ok(mut users) => {
             if users.len() > 1 {
-                println!("Error: Multiple users found for name: {} and url: {}", name, url);
+                warn!(%name, %url, "Multiple users found for the same name and url");
             }
             users.pop()
         },
         Err(e) => {
-            println!("Database error: {}", e);
+            error!(error = %e, "Database error");
             None
         },
     }
@@ -104,19 +105,20 @@ pub fn find_all_users_with_room_data_in_db(conn: &Arc<Mutex<Connection>>, room_i
     let mut stmt = match connection.prepare(&sql) {
         Ok(stmt) => stmt,
         Err(e) => {
-            println!("Database error: {}", e);
+            error!(error = %e, "Database error");
             return None;
         }
     };
 
     let users = do_get_user_sql_inner(params, &mut stmt, &connection, true);
 
-    if users.is_err() {
-        println!("Database error: {}", users.err().unwrap());
-        return None;
+    match users {
+        Ok(users) => Some(users),
+        Err(e) => {
+            error!(error = %e, "Database error");
+            None
+        }
     }
-
-    return Some(users.unwrap());
 }
 
 fn do_get_user_sql<P: Params>(
@@ -128,7 +130,7 @@ fn do_get_user_sql<P: Params>(
     let mut stmt = match connection.prepare(&sql) {
         Ok(stmt) => stmt,
         Err(e) => {
-            println!("Database error: {}", e);
+            error!(error = %e, "Database error");
             return Err(e);
         }
     };

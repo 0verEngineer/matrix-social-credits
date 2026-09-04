@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 use rusqlite::{Connection, Error, params, Params, ToSql};
+use tracing::{error, warn};
 
 #[derive(Clone)]
 pub struct Event {
@@ -42,12 +43,12 @@ pub fn find_event_in_db(
     match do_get_event_sql(conn, sql, params) {
         Ok(mut users) => {
             if users.len() > 1 {
-                println!("Error: Multiple events found for id: {}", id);
+                warn!(event_id = %id, "Multiple events found for the same id");
             }
             users.pop()
         },
         Err(e) => {
-            println!("Database error: {}", e);
+            error!(error = %e, "Database error");
             None
         },
     }
@@ -62,7 +63,7 @@ fn do_get_event_sql<P: Params>(
     let mut stmt = match connection.prepare(&sql) {
         Ok(stmt) => stmt,
         Err(e) => {
-            println!("Database error: {}", e);
+            error!(error = %e, "Database error");
             return Err(e);
         }
     };

@@ -2,6 +2,7 @@ use std::time::Duration;
 use matrix_sdk::Client;
 use matrix_sdk::{Room, RoomState};
 use matrix_sdk::ruma::events::room::member::StrippedRoomMemberEvent;
+use tracing::{debug, error, info, warn};
 
 /// Autojoin // todo check if it works if kicked once and reinvited
 pub async fn on_stripped_state_member(event: StrippedRoomMemberEvent,
@@ -13,12 +14,12 @@ pub async fn on_stripped_state_member(event: StrippedRoomMemberEvent,
 
     match room.state() {
         RoomState::Joined => {
-            println!("Already joined room {}", room.room_id());
+            debug!(room_id = %room.room_id(), "Already joined room");
         },
         RoomState::Invited | RoomState::Knocked => {
             if room.name().is_none() { return; }
             let room_name = room.name().unwrap();
-            println!("Invited into room {}, id: {}", room_name, room.room_id());
+            info!(room_name, room_id = %room.room_id(), "Invited into room");
             tokio::spawn(async move {
                 let mut delay = 2;
 
@@ -26,22 +27,22 @@ pub async fn on_stripped_state_member(event: StrippedRoomMemberEvent,
                     // retry autojoin due to synapse sending invites, before the
                     // invited user can join for more information see
                     // https://github.com/matrix-org/synapse/issues/4345
-                    eprintln!("Failed to join room {}, id: {} ({err:?}), retrying in {delay}s", room_name, room.room_id());
+                    warn!(room_name, room_id = %room.room_id(), delay_secs = delay, error = ?err, "Failed to join room, retrying");
 
                     tokio::time::sleep(Duration::from_secs(delay)).await;
                     delay *= 2;
 
                     if delay > 3600 {
-                        eprintln!("Can't join room {}, id: {} ({err:?})", room_name, room.room_id());
+                        error!(room_name, room_id = %room.room_id(), error = ?err, "Giving up joining room");
                         break;
                     }
                 }
-                println!("Successfully joined room {}, id: {}", room_name, room.room_id());
+                info!(room_name, room_id = %room.room_id(), "Successfully joined room");
             });
         },
         RoomState::Left | RoomState::Banned => {
             if room.name().is_none() { return; }
-            println!("Left room {}, id: {}", room.name().unwrap(), room.room_id());
+            info!(room_name = room.name().unwrap(), room_id = %room.room_id(), "Left room");
         },
     }
 }

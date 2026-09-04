@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 use rusqlite::{Connection, Error, params, Result};
 use crate::data::user_reaction::{get_user_reactions, UserReaction};
+use tracing::error;
 
 
 #[derive(Clone)]
@@ -52,7 +53,7 @@ impl UserRoomData {
         self.reactions.push(reaction.clone());
 
         if reaction.insert(&conn.lock().unwrap()).is_err() {
-            println!("Failed to insert user reaction");
+            error!("Failed to insert user reaction");
         }
 
         // todo configurable (weekly) db cleanup
@@ -64,7 +65,7 @@ impl UserRoomData {
             &conn.lock().unwrap(),
             prev.duration_since(SystemTime::UNIX_EPOCH).unwrap_or(Duration::from_secs(0)).as_secs() as i32).is_err()
         {
-            println!("Failed to cleanup user reactions");
+            error!("Failed to cleanup user reactions");
         }*/
     }
 }

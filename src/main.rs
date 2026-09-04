@@ -18,14 +18,34 @@ use crate::data::user_reaction::{create_table_user_reaction};
 use crate::event_handler::EventHandler;
 use crate::utils::autojoin::on_stripped_state_member;
 use crate::utils::user_util::{initial_admin_user_setup};
+use tracing::info;
+use tracing_subscriber::EnvFilter;
 
 
 // todo session preservation and emoji verification
-// todo logging + log levels + file logging
 // todo query all room users on initial setup and create user_room_data for every user, also handle user joining
+
+/// Log level defaults. Overridable via `RUST_LOG`, e.g.
+/// `RUST_LOG=matrix_social_credits=debug,matrix_sdk=info`.
+///
+/// The SDK is kept at `warn` on purpose: its `info` output is very chatty, but its warnings
+/// carry the rate limit and retry diagnostics we care about.
+const DEFAULT_LOG_FILTER: &str = "matrix_social_credits=info,matrix_sdk=warn";
+
+fn init_logging() {
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(DEFAULT_LOG_FILTER));
+
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(true)
+        .init();
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    init_logging();
+
     let db_path = env::var("DB_PATH").expect("DB_PATH not set");
     let initial_social_credit = get_env_var_as_i32("INITIAL_SOCIAL_CREDIT");
     let reaction_timespan = get_env_var_as_i32("REACTION_TIMESPAN");
@@ -60,6 +80,7 @@ async fn main() -> anyhow::Result<()> {
         .initial_device_display_name("Social Credit System")
         .send()
         .await?;
+    info!(user_id = ?client.user_id(), "Logged in");
     client.add_event_handler(on_stripped_state_member);
 
     let shared_conn = Arc::new(Mutex::new(conn));
@@ -84,6 +105,7 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    info!("Starting sync loop");
     client.sync(SyncSettings::default()).await.expect("Sync loop fail");
 
     Ok(())
