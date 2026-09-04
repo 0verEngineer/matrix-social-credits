@@ -3,3 +3,4 @@ pub mod autojoin;
 pub mod emoji_util;
 pub mod matrix_util;
 pub mod session;
+pub mod message;

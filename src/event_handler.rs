@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 use matrix_sdk::{Room, RoomState};
 use matrix_sdk::ruma::{events};
 use matrix_sdk::ruma::events::{AnySyncMessageLikeEvent, AnySyncTimelineEvent};
-use matrix_sdk::ruma::events::room::message::{MessageType, Relation, RoomMessageEventContent};
+use matrix_sdk::ruma::events::room::message::{MessageType, Relation};
 use matrix_sdk::ruma::{OwnedUserId, UserId};
 use rusqlite::Connection;
 use crate::data::emoji::{Emoji, delete_emoji, find_emoji_in_db, insert_emoji};
@@ -11,6 +11,7 @@ use crate::data::user::{User, UserType};
 use crate::data::user_room_data::add_social_credit;
 use crate::utils::emoji_util::{get_emoji_list_answer, normalize_emoji};
 use crate::utils::matrix_util::send_message;
+use crate::utils::message::{escape_html, notice_html, notice_plain};
 use crate::utils::user_util::{compare_user, get_user_list_answer, setup_user};
 use tracing::{debug, error, trace};
 
@@ -147,8 +148,12 @@ impl EventHandler {
                     if time_till_user_can_react > 0 {
                         let minutes = time_till_user_can_react / 60;
                         let seconds = time_till_user_can_react % 60;
-                        let text = format!("{}, you are still on cooldown, remaining time: {}m {}s", sender.name, minutes, seconds);
-                        send_message(&room, RoomMessageEventContent::text_html(text.clone(), text)).await;
+                        let text = format!(
+                            "{}, you are still on cooldown, remaining time: {}m {}s",
+                            sender.name, minutes, seconds
+                        );
+                        let html = escape_html(&text);
+                        send_message(&room, notice_html(text, html)).await;
                         return;
                     }
 
@@ -170,8 +175,21 @@ impl EventHandler {
 
                     sender.room_data.unwrap().add_reaction(&self.conn, &annotated_message_id);
 
-                    let text = format!("<b>{}</b> changed <b>{}'s</b> Social Credit Score using {} from <b>{}</b> to <b>{}</b>", sender.name, recipient.name, emoji.emoji, old_social_credit, new_social_credit);
-                    send_message(&room, RoomMessageEventContent::text_html(text.clone(), text)).await;
+                    // The plaintext body used to be the HTML string, so clients without HTML
+                    // rendering and push notifications showed the raw <b> tags.
+                    let plain = format!(
+                        "{} changed {}'s Social Credit Score using {} from {} to {}",
+                        sender.name, recipient.name, emoji.emoji, old_social_credit, new_social_credit
+                    );
+                    let html = format!(
+                        "<b>{}</b> changed <b>{}'s</b> Social Credit Score using {} from <b>{}</b> to <b>{}</b>",
+                        escape_html(&sender.name),
+                        escape_html(&recipient.name),
+                        escape_html(&emoji.emoji),
+                        old_social_credit,
+                        new_social_credit
+                    );
+                    send_message(&room, notice_html(plain, html)).await;
                 }
             }
         }
@@ -240,7 +258,7 @@ impl EventHandler {
 
         send_message(
             room,
-            RoomMessageEventContent::text_plain("You are not allowed to use this command"),
+            notice_plain("You are not allowed to use this command"),
         )
         .await;
         false
@@ -275,22 +293,50 @@ impl EventHandler {
 
     async fn handle_list(&self, room: &Room) {
         let answer = get_user_list_answer(&self.conn, room, &self.own_user_id).await;
-        send_message(room, RoomMessageEventContent::text_html(answer.text, answer.html)).await;
+        send_message(room, notice_html(answer.text, answer.html)).await;
     }
 
     async fn handle_list_emojis(&self, room: &Room) {
         let answer = get_emoji_list_answer(&self.conn, room);
-        send_message(room, RoomMessageEventContent::text_html(answer.text, answer.html)).await;
+        send_message(room, notice_html(answer.text, answer.html)).await;
     }
 
     async fn handle_help(&self, room: &Room) {
-        let help_body = "<h3>Commands:</h3><br>
-                - <b>!list</b>: List all users and their social credit score for the current room<br><br>
-                - <b>!list_emoji</b>: List all registered emojis and their social credit score for the current room<br><br>
-                - <b>!register_emoji</b> <emoji> <social_credit>: Register an emoji with a social credit score for the current room. Example: !register_emoji 😑 -25<br><br>
-                - <b>!unregister_emoji</b> <emoji>: Remove a registered emoji from the current room. Example: !unregister_emoji 😑
-            ".to_string();
-        send_message(room, RoomMessageEventContent::text_html(help_body.clone(), help_body)).await;
+        // The placeholders have to be escaped. As literal <emoji> and <social_credit> they
+        // were swallowed by every client as unknown HTML tags, so the help text read
+        // "!register_emoji  : Register an emoji ...".
+        let commands = [
+            ("!list", "List all users and their social credit score for the current room"),
+            ("!list_emoji", "List all registered emojis and their social credit score for the current room"),
+            (
+                "!register_emoji <emoji> <social_credit>",
+                "Register an emoji with a social credit score for the current room. Example: !register_emoji 😑 -25",
+            ),
+            (
+                "!unregister_emoji <emoji>",
+                "Remove a registered emoji from the current room. Example: !unregister_emoji 😑",
+            ),
+        ];
+
+        let plain = std::iter::once("Commands:".to_owned())
+            .chain(commands.iter().map(|(usage, description)| format!("- {usage}: {description}")))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let html = format!(
+            "<h3>Commands:</h3>{}",
+            commands
+                .iter()
+                .map(|(usage, description)| format!(
+                    "<b>{}</b>: {}",
+                    escape_html(usage),
+                    escape_html(description)
+                ))
+                .collect::<Vec<_>>()
+                .join("<br>")
+        );
+
+        send_message(room, notice_html(plain, html)).await;
     }
 
     async fn handle_register_emoji(&self, room: &Room, sender: &User, arguments: &str) {
@@ -304,25 +350,25 @@ impl EventHandler {
         // previous split(" ") plus "drop a leading empty part" special case did not.
         let parts = arguments.split_whitespace().collect::<Vec<&str>>();
         if parts.len() != 2 {
-            send_message(room, RoomMessageEventContent::text_plain(error_message)).await;
+            send_message(room, notice_plain(error_message)).await;
             return;
         }
 
         let emoji_text = normalize_emoji(parts[0]);
         let Ok(social_credit) = parts[1].parse::<i32>() else {
-            send_message(room, RoomMessageEventContent::text_plain(error_message)).await;
+            send_message(room, notice_plain(error_message)).await;
             return;
         };
 
         if emoji_text.is_empty() {
-            send_message(room, RoomMessageEventContent::text_plain(error_message)).await;
+            send_message(room, notice_plain(error_message)).await;
             return;
         }
 
         let room_id = &room.room_id().to_string();
 
         if find_emoji_in_db(&self.conn, &emoji_text, room_id).is_some() {
-            send_message(room, RoomMessageEventContent::text_plain("Emoji already registered")).await;
+            send_message(room, notice_plain("Emoji already registered")).await;
             return;
         }
 
@@ -335,13 +381,13 @@ impl EventHandler {
 
         if insert_emoji(&self.conn, &emoji).is_err() {
             error!(emoji = %emoji.emoji, "Unable to insert emoji into db");
-            send_message(room, RoomMessageEventContent::text_plain("Failed to register the emoji")).await;
+            send_message(room, notice_plain("Failed to register the emoji")).await;
             return;
         }
 
         send_message(
             room,
-            RoomMessageEventContent::text_plain(format!(
+            notice_plain(format!(
                 "Emoji registered: {} with social credit score: {}",
                 emoji.emoji, emoji.social_credit
             )),
@@ -362,7 +408,7 @@ impl EventHandler {
 
         let parts = arguments.split_whitespace().collect::<Vec<&str>>();
         if parts.len() != 1 {
-            send_message(room, RoomMessageEventContent::text_plain(error_message)).await;
+            send_message(room, notice_plain(error_message)).await;
             return;
         }
 
@@ -370,19 +416,19 @@ impl EventHandler {
         let room_id = room.room_id().to_string();
 
         if find_emoji_in_db(&self.conn, &emoji_text, &room_id).is_none() {
-            send_message(room, RoomMessageEventContent::text_plain("Emoji is not registered")).await;
+            send_message(room, notice_plain("Emoji is not registered")).await;
             return;
         }
 
         if delete_emoji(&self.conn, &emoji_text, &room_id).is_err() {
             error!(emoji = %emoji_text, "Unable to delete emoji from db");
-            send_message(room, RoomMessageEventContent::text_plain("Failed to remove the emoji")).await;
+            send_message(room, notice_plain("Failed to remove the emoji")).await;
             return;
         }
 
         send_message(
             room,
-            RoomMessageEventContent::text_plain(format!("Emoji removed: {emoji_text}")),
+            notice_plain(format!("Emoji removed: {emoji_text}")),
         )
         .await;
     }

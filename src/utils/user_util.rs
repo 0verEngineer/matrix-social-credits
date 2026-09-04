@@ -5,7 +5,13 @@ use matrix_sdk::ruma::{OwnedUserId, ServerName, UserId};
 use rusqlite::Connection;
 use crate::data::user::{find_all_users_with_room_data_in_db, find_user_in_db, insert_user, update_user, User, HtmlAndTextAnswer, UserType};
 use crate::data::user_room_data::{find_user_room_data_by_user_id_and_room_id, insert_user_room_data, UserRoomData};
+use crate::utils::message::escape_html;
 use tracing::{debug, error, info, warn};
+
+/// Upper bound on how many users a single `!list` answer shows.
+///
+/// A Matrix event may not exceed 64 KiB, and there was no limit at all before.
+const MAX_LISTED_USERS: usize = 100;
 
 pub fn compare_user(user1: &User, user2: &User) -> bool {
     user1.name == user2.name && user1.url == user2.url
@@ -165,25 +171,42 @@ pub async fn get_user_list_answer(conn: &Arc<Mutex<Connection>>, room: &Room, ow
     users.sort_by(|a, b| {
         let a_credit = a.room_data.as_ref().map_or(0, |sc| sc.social_credit);
         let b_credit = b.room_data.as_ref().map_or(0, |sc| sc.social_credit);
-        b_credit.cmp(&a_credit)
+        b_credit.cmp(&a_credit).then_with(|| a.name.cmp(&b.name))
     });
+
+    let total = users.len();
+    let truncated = total > MAX_LISTED_USERS;
+    users.truncate(MAX_LISTED_USERS);
 
     let mut text_entries: Vec<String> = Vec::with_capacity(users.len());
     let mut html_entries: Vec<String> = Vec::with_capacity(users.len());
 
-    for user in users {
+    for (index, user) in users.into_iter().enumerate() {
         let Some(room_data) = user.room_data else {
             continue;
         };
-        text_entries.push(format!("{}: {}", user.name, room_data.social_credit));
-        html_entries.push(format!("{}: <b>{}</b>", user.name, room_data.social_credit));
+        let rank = index + 1;
+        text_entries.push(format!("{}. {}: {}", rank, user.name, room_data.social_credit));
+        html_entries.push(format!(
+            "{}. {}: <b>{}</b>",
+            rank,
+            escape_html(&user.name),
+            room_data.social_credit
+        ));
     }
 
+    let cut_note = if truncated {
+        format!(" (showing the top {MAX_LISTED_USERS} of {total})")
+    } else {
+        String::new()
+    };
+
     HtmlAndTextAnswer {
-        text: format!("Social Credit Scores{}: {}", note, text_entries.join(", ")),
+        text: format!("Social Credit Scores{note}{cut_note}:\n{}", text_entries.join("\n")),
         html: format!(
-            "<h3>Social Credit Scores{}:</h3><br>{}",
-            note,
+            "<h3>Social Credit Scores{}{}:</h3>{}",
+            escape_html(note),
+            escape_html(&cut_note),
             html_entries.join("<br>")
         ),
     }

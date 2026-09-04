@@ -3,6 +3,7 @@ use matrix_sdk::Room;
 use rusqlite::Connection;
 use crate::data::emoji::find_all_emoji_for_room_in_db;
 use crate::data::user::{HtmlAndTextAnswer};
+use crate::utils::message::escape_html;
 
 /// Unicode variation selectors. VS16 asks for the coloured emoji presentation, VS15 for the
 /// monochrome text presentation. Clients disagree on whether to send them, so the same emoji
@@ -46,38 +47,26 @@ pub fn get_emoji_list_answer(conn: &Arc<Mutex<Connection>>, room: &Room) -> Html
         return empty_answer;
     }
 
-    let mut text_body = String::from("Registered Emojis: ");
-    let mut html_body = String::from("<h3>Registered Emojis:</h3><br>");
-
     let mut emojis = emojis_opt.unwrap();
 
-    if emojis.len() == 0 {
+    if emojis.is_empty() {
         return empty_answer;
     }
 
     // Sort emojis by social credit
-    emojis.sort_by(|a, b| {
-        let a_credit = a.social_credit;
-        let b_credit = b.social_credit;
-        b_credit.cmp(&a_credit)
-    });
+    emojis.sort_by(|a, b| b.social_credit.cmp(&a.social_credit).then_with(|| a.emoji.cmp(&b.emoji)));
 
-    for emoji in emojis {
-        text_body.push_str(&format!("{}: {},", emoji.emoji, emoji.social_credit));
-        html_body.push_str(&format!("{}: <b>{}</b><br>", emoji.emoji, emoji.social_credit));
-    }
-
-    // Remove the last comma
-    if text_body.len() >= 1 {
-        text_body.remove(text_body.len() - 1);
-    }
-    // Remove the last <br>
-    if html_body.len() >= 4 {
-        html_body.truncate(html_body.len() - 4);
-    }
+    let text_entries: Vec<String> = emojis
+        .iter()
+        .map(|emoji| format!("{}: {}", emoji.emoji, emoji.social_credit))
+        .collect();
+    let html_entries: Vec<String> = emojis
+        .iter()
+        .map(|emoji| format!("{}: <b>{}</b>", escape_html(&emoji.emoji), emoji.social_credit))
+        .collect();
 
     HtmlAndTextAnswer {
-        html: html_body.to_string(),
-        text: text_body.to_string(),
+        text: format!("Registered Emojis: {}", text_entries.join(", ")),
+        html: format!("<h3>Registered Emojis:</h3>{}", html_entries.join("<br>")),
     }
 }
