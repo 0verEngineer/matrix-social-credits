@@ -5,6 +5,8 @@ use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
 use matrix_sdk::{Client, Error, Room};
 use tracing::{error, info, warn};
 
+use crate::utils::session::SessionStore;
+
 /// Smallest delay used by our own retry loops.
 const MIN_BACKOFF: Duration = Duration::from_secs(1);
 /// Upper bound for a single wait, so we keep polling a homeserver that is still booting.
@@ -85,13 +87,64 @@ fn backoff_for(attempt: u32) -> Duration {
     (base + jitter).min(MAX_BACKOFF + Duration::from_secs(1))
 }
 
+/// Restore a stored session, or log in and store the resulting one.
+///
+/// Restoring is tried first so a restart does not create yet another device and does not hit
+/// the `/login` rate limit at all. If the homeserver rejects the stored session (revoked
+/// token, account logged out elsewhere) the file is dropped and a fresh login is performed.
+pub async fn authenticate(
+    client: &Client,
+    store: &SessionStore,
+    username: &str,
+    password: &str,
+    device_display_name: &str,
+    budget: Duration,
+) -> anyhow::Result<()> {
+    if let Some(session) = store.load() {
+        match client.restore_session(session).await {
+            Ok(()) => {
+                // restore_session only loads the tokens; ask the homeserver whether they are
+                // still valid before we rely on them.
+                match client.whoami().await {
+                    Ok(_) => {
+                        info!("Reused the stored session");
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        warn!(%error, "The stored session was rejected, logging in again");
+                        store.clear();
+                    }
+                }
+            }
+            Err(error) => {
+                warn!(%error, "Unable to restore the stored session, logging in again");
+                store.clear();
+            }
+        }
+    }
+
+    login_with_retry(client, username, password, device_display_name, budget).await?;
+
+    match client.matrix_auth().session() {
+        Some(session) => {
+            if let Err(error) = store.save(&session) {
+                // Not fatal, it just means the next start logs in again.
+                warn!(%error, "Unable to save the session");
+            }
+        }
+        None => warn!("Logged in but no session to save"),
+    }
+
+    Ok(())
+}
+
 /// Log in, retrying while the homeserver is unreachable or rate limiting us.
 ///
 /// Without this the bot dies on startup whenever the Matrix stack is restarted: `/login` is
 /// one of the endpoints Synapse rate limits most aggressively, and with
 /// `restart: unless-stopped` a crash on 429 turns into a restart loop that makes the rate
 /// limiting worse.
-pub async fn login_with_retry(
+async fn login_with_retry(
     client: &Client,
     username: &str,
     password: &str,

@@ -14,7 +14,8 @@ use std::sync::{Arc, Mutex};
 use crate::data::migrations::{cleanup_events, open_and_migrate};
 use crate::event_handler::EventHandler;
 use crate::utils::autojoin::on_stripped_state_member;
-use crate::utils::matrix_util::{Retryable, classify_error, log_retry_configuration, login_with_retry};
+use crate::utils::matrix_util::{Retryable, authenticate, classify_error, log_retry_configuration};
+use crate::utils::session::SessionStore;
 use crate::utils::user_util::{initial_admin_user_setup, resolve_configured_user_id};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -99,9 +100,16 @@ async fn main() -> anyhow::Result<()> {
     // Database setup, including the schema migrations and the connection pragmas.
     let conn = open_and_migrate(&db_path)?;
 
+    // The client state (sync token, room state, member lists) and the session live next to
+    // the database unless STORE_PATH says otherwise.
+    let store_path = env::var("STORE_PATH").unwrap_or_else(|_| default_store_path(&db_path));
+    let session_store = SessionStore::new(&store_path)?;
+    info!(path = %store_path, "Using the client state store");
+
     log_retry_configuration(http_retry_limit, http_max_retry_time);
     let client = Client::builder()
         .homeserver_url(homeserver_url.clone())
+        .sqlite_store(session_store.state_store_path(), None)
         .request_config(
             RequestConfig::new()
                 .retry_limit(http_retry_limit)
@@ -110,8 +118,9 @@ async fn main() -> anyhow::Result<()> {
         .build()
         .await?;
 
-    login_with_retry(
+    authenticate(
         &client,
+        &session_store,
         username.as_str(),
         password.as_str(),
         "Social Credit System",
@@ -256,6 +265,17 @@ async fn shutdown_signal() {
     {
         let _ = tokio::signal::ctrl_c().await;
     }
+}
+
+/// Put the client state store next to the database file by default.
+fn default_store_path(db_path: &str) -> String {
+    std::path::Path::new(db_path)
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(|parent| parent.join("store"))
+        .unwrap_or_else(|| std::path::PathBuf::from("store"))
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn get_env_var_as_i32(var_name: &str) -> i32 {

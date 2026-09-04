@@ -9,9 +9,11 @@ rust-version = "1.93"
 [dependencies]
 # default-features would pull in e2e-encryption + the sqlite stores. The bot does not
 # support encrypted rooms yet, so we keep the dependency tree small for now.
-matrix-sdk = { version = "0.18.0", default-features = false }
+matrix-sdk = { version = "0.18.0", default-features = false, features = ["bundled-sqlite"] }
 anyhow = "1.0.104"
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
 tokio = { version = "1.53.1", features = ["full"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
