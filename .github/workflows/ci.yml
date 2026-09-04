@@ -72,7 +72,11 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-          HAS_CREDENTIALS: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
+          # The user name is not a secret, so it is accepted as a variable too -- that is
+          # where it naturally ends up, and having it only there used to look exactly like
+          # "no credentials configured".
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME || vars.DOCKERHUB_USERNAME }}
+          HAS_TOKEN: ${{ secrets.DOCKERHUB_TOKEN != '' }}
         run: |
           set -euo pipefail
 
@@ -127,16 +131,30 @@ jobs:
             tags="$IMAGE:branch-$branch"$'\n'"$IMAGE:branch-$branch-$short_sha"
           fi
 
+          # Name what is actually missing. "DOCKERHUB_USERNAME and DOCKERHUB_TOKEN are not
+          # set" sends you looking at both when only one of them is the problem.
+          missing=""
+          if [ -z "${DOCKERHUB_USERNAME:-}" ]; then
+            missing="DOCKERHUB_USERNAME"
+          fi
+          if [ "$HAS_TOKEN" != "true" ]; then
+            missing="${missing:+$missing and }DOCKERHUB_TOKEN"
+          fi
+
           push=true
           reason=""
-          if [ "$HAS_CREDENTIALS" != "true" ]; then
-            push=false
-            reason="the repository secrets DOCKERHUB_USERNAME and DOCKERHUB_TOKEN are not set"
-          elif [ "$EVENT" = "pull_request" ] && [ "$PR_HEAD_REPO" != "$GITHUB_REPOSITORY" ]; then
-            # Pull requests from a fork deliberately do not get the secrets. The image is
-            # built to prove it still builds, but there is nowhere to push it.
+          # Only set when the missing credentials are the actual reason: on a fork pull
+          # request they are missing too, but pointing at the settings page would be wrong.
+          credentials_hint=""
+          if [ "$EVENT" = "pull_request" ] && [ "$PR_HEAD_REPO" != "$GITHUB_REPOSITORY" ]; then
+            # Checked before the credentials on purpose: a fork pull request is not given the
+            # secrets at all, so it would otherwise be reported as a misconfigured repository.
             push=false
             reason="this pull request comes from the fork $PR_HEAD_REPO"
+          elif [ -n "$missing" ]; then
+            push=false
+            reason="$missing is not available to this workflow run"
+            credentials_hint="yes"
           fi
 
           primary_tag=$(printf '%s' "$tags" | head -n1)
@@ -161,6 +179,13 @@ jobs:
               echo
               echo "The image is built for \`linux/amd64\` and \`linux/arm64\`, but not pushed,"
               echo "because $reason."
+              if [ -n "$credentials_hint" ]; then
+                echo
+                echo "Set it under **Settings → Secrets and variables → Actions**."
+                echo "\`DOCKERHUB_TOKEN\` has to be a secret; \`DOCKERHUB_USERNAME\` may be either a"
+                echo "secret or a variable. A secret added *after* this run started does not apply to"
+                echo "it -- start a new run."
+              fi
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
@@ -194,7 +219,7 @@ jobs:
         if: needs.meta.outputs.push == 'true'
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          username: ${{ secrets.DOCKERHUB_USERNAME || vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       # Each runner pushes its own single-arch image without a tag; the publish job below
@@ -267,7 +292,7 @@ jobs:
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          username: ${{ secrets.DOCKERHUB_USERNAME || vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Create the multi-arch manifest

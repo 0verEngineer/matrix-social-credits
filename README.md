@@ -143,14 +143,18 @@ pre-release suffix (`0.2.0-rc.1`) is published under that exact tag only and mov
 
 ### Repository secrets
 
-| Secret | Needed for |
-| --- | --- |
-| `DOCKERHUB_USERNAME` | pushing any image |
-| `DOCKERHUB_TOKEN` | pushing any image; needs the *Read, Write, Delete* scope so closed pull request tags can be cleaned up again |
-| `CODEBERG_TOKEN` | the Codeberg mirror |
+| Name | Kind | Needed for |
+| --- | --- | --- |
+| `DOCKERHUB_USERNAME` | secret **or** variable | pushing any image |
+| `DOCKERHUB_TOKEN` | secret | pushing any image; needs the *Read, Write, Delete* scope so closed pull request tags can be cleaned up again |
+| `CODEBERG_TOKEN` | secret | the Codeberg mirror |
 
-Without the Docker Hub secrets the workflow still builds both architectures and just says in
-the job summary that it did not push.
+The user name is not sensitive, so a repository variable of that name works just as well as a
+secret; the workflow takes whichever exists.
+
+Without them the workflow still builds both architectures and says in the job summary which
+one is missing. Note that a run only sees the secrets and variables that existed when it
+started -- adding one does not fix a run that is already going, you need a new run.
 
 
 <!-- CONFIGURATION -->
