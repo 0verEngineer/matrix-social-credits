@@ -9,6 +9,7 @@ use crate::data::event::{Event, find_event_in_db, insert_event};
 use crate::data::user::{update_user, User, UserType};
 use crate::data::user_room_data::update_user_room_data;
 use crate::utils::emoji_util::get_emoji_list_answer;
+use crate::utils::matrix_util::send_message;
 use crate::utils::user_util::{compare_user, extract_userdata_from_string, get_user_list_answer, setup_user};
 use tracing::{debug, error, trace};
 
@@ -86,10 +87,7 @@ impl EventHandler {
                     let minutes = time_till_user_can_react / 60;
                     let seconds = time_till_user_can_react % 60;
                     let text = format!("{}, you are still on cooldown, remaining time: {}m {}s", sender.name, minutes, seconds);
-                    room.send(RoomMessageEventContent::text_html(
-                        text.clone(),
-                        text
-                    )).await.unwrap();
+                    send_message(&room, RoomMessageEventContent::text_html(text.clone(), text)).await;
                     return;
                 }
 
@@ -155,10 +153,7 @@ impl EventHandler {
                     sender.room_data.unwrap().add_reaction(&self.conn, self.reaction_period_minutes, &message_like_event.event_id().to_string());
 
                     let text = format!("<b>{}</b> changed <b>{}'s</b> Social Credit Score using {} from <b>{}</b> to <b>{}</b>", sender.name, recipient.name, emoji.emoji, old_social_credit, recipient.room_data.unwrap().social_credit);
-                    room.send(RoomMessageEventContent::text_html(
-                        text.clone(),
-                        text
-                    )).await.unwrap();
+                    send_message(&room, RoomMessageEventContent::text_html(text.clone(), text)).await;
                 }
             }
         }
@@ -227,7 +222,7 @@ impl EventHandler {
         if stripped_body == "!list" {
             let answer = get_user_list_answer(&self.conn, room);
             let content = RoomMessageEventContent::text_html(answer.text, answer.html);
-            room.send(content).await.unwrap();
+            send_message(room, content).await;
             true;
         }
         false
@@ -237,7 +232,7 @@ impl EventHandler {
         if stripped_body == "!list_emoji" || stripped_body == "!list-emoji" || stripped_body == "!list_emojis" || stripped_body == "!list-emojis" {
             let answer = get_emoji_list_answer(&self.conn, room);
             let content = RoomMessageEventContent::text_html(answer.text, answer.html);
-            room.send(content).await.unwrap();
+            send_message(room, content).await;
             true;
         }
         false
@@ -251,7 +246,7 @@ impl EventHandler {
                 - <b>!register_emoji</b> <emoji> <social_credit>: Register an emoji with a social credit score for the current room. Example: !register_emoji 😑 -25
             ".to_string();
             let content = RoomMessageEventContent::text_html(help_body.clone(), help_body);
-            room.send(content).await.unwrap();
+            send_message(room, content).await;
             true;
         }
         false
@@ -262,7 +257,7 @@ impl EventHandler {
             match sender.clone().user_type {
                 UserType::Admin => {},
                 _ => {
-                    room.send(RoomMessageEventContent::text_plain("You are not allowed to use this command")).await.unwrap();
+                    send_message(&room, RoomMessageEventContent::text_plain("You are not allowed to use this command")).await;
                     return true;
                 }
             }
@@ -272,7 +267,7 @@ impl EventHandler {
             if text_opt.is_none() {
                 text_opt = body.strip_prefix("!register-emoji");
                 if text_opt.is_none() {
-                    room.send(RoomMessageEventContent::text_plain(error_message)).await.unwrap();
+                    send_message(&room, RoomMessageEventContent::text_plain(error_message)).await;
                     return true;
                 }
             }
@@ -282,14 +277,14 @@ impl EventHandler {
             }
 
             if parts.len() != 2 {
-                room.send(RoomMessageEventContent::text_plain(error_message)).await.unwrap();
+                send_message(&room, RoomMessageEventContent::text_plain(error_message)).await;
                 return true;
             }
 
             let emoji = parts[0];
             let social_credit_opt = parts[1].parse::<i32>();
             if social_credit_opt.is_err() || emoji.is_empty() || emoji == " " {
-                room.send(RoomMessageEventContent::text_plain(error_message)).await.unwrap();
+                send_message(&room, RoomMessageEventContent::text_plain(error_message)).await;
                 return true;
             }
             let social_credit = social_credit_opt.unwrap();
@@ -297,7 +292,7 @@ impl EventHandler {
             let room_id = &room.room_id().to_string();
 
             if find_emoji_in_db(&self.conn, &emoji.to_string(), room_id).is_some() {
-                room.send(RoomMessageEventContent::text_plain("Emoji already registered")).await.unwrap();
+                send_message(&room, RoomMessageEventContent::text_plain("Emoji already registered")).await;
                 return true;
             }
 
@@ -312,7 +307,7 @@ impl EventHandler {
                 error!(emoji = %emoji.emoji, "Unable to insert emoji into db");
                 return true;
             }
-            room.send(RoomMessageEventContent::text_plain(format!("Emoji registered: {} with social credit score: {}", emoji.emoji, emoji.social_credit))).await.unwrap();
+            send_message(&room, RoomMessageEventContent::text_plain(format!("Emoji registered: {} with social credit score: {}", emoji.emoji, emoji.social_credit))).await;
             true;
         }
         false

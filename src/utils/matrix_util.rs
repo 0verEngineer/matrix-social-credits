@@ -1,0 +1,164 @@
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use matrix_sdk::ruma::api::error::{ErrorKind, RetryAfter};
+use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
+use matrix_sdk::{Client, Error, Room};
+use tracing::{error, info, warn};
+
+/// Smallest delay used by our own retry loops.
+const MIN_BACKOFF: Duration = Duration::from_secs(1);
+/// Upper bound for a single wait, so we keep polling a homeserver that is still booting.
+const MAX_BACKOFF: Duration = Duration::from_secs(60);
+
+/// How a failed request should be treated by our own retry loops.
+///
+/// This mirrors what matrix-sdk does internally for the requests it retries itself, but we
+/// need the same decision for the calls the SDK cannot retry for us -- most importantly the
+/// login, which happens before any `RequestConfig` retry budget applies to a live session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Retryable {
+    /// Worth trying again. `retry_after` is what the homeserver asked us to wait, if it said
+    /// anything at all.
+    Yes { retry_after: Option<Duration> },
+    /// Trying again would fail exactly the same way.
+    No,
+}
+
+/// Decide whether `error` is worth retrying.
+pub fn classify_error(error: &Error) -> Retryable {
+    match error.client_api_error_kind() {
+        // 429 M_LIMIT_EXCEEDED. Synapse returns this a lot right after a restart, and it
+        // tells us how long to wait -- respecting that is the whole point.
+        Some(ErrorKind::LimitExceeded(limit)) => {
+            let retry_after = match limit.retry_after.as_ref() {
+                Some(RetryAfter::Delay(delay)) => Some(*delay),
+                Some(RetryAfter::DateTime(when)) => {
+                    when.duration_since(SystemTime::now()).ok()
+                }
+                None => None,
+            };
+            Retryable::Yes { retry_after }
+        }
+
+        // Nothing we can fix by waiting: wrong credentials, revoked token, gone account.
+        Some(
+            ErrorKind::Forbidden
+            | ErrorKind::UnknownToken(_)
+            | ErrorKind::UserDeactivated
+            | ErrorKind::UserSuspended
+            | ErrorKind::UserLocked
+            | ErrorKind::Unrecognized
+            | ErrorKind::InvalidUsername
+            | ErrorKind::MissingToken,
+        ) => Retryable::No,
+
+        // Some other Matrix error, or a proxy answering without a Matrix body. Go by the
+        // status code: 429 and 5xx are transient, the rest is not.
+        _ => match error.as_client_api_error() {
+            Some(api_error) => {
+                let status = api_error.status_code.as_u16();
+                if status == 429 || (500..600).contains(&status) {
+                    Retryable::Yes { retry_after: None }
+                } else {
+                    Retryable::No
+                }
+            }
+            // No Matrix error at all, so this failed below the Matrix layer: connection
+            // refused, DNS not up yet, TLS handshake aborted. Exactly what happens while the
+            // Matrix stack is restarting, and always worth retrying.
+            None => Retryable::Yes { retry_after: None },
+        },
+    }
+}
+
+/// Exponential backoff with jitter, capped at [`MAX_BACKOFF`].
+///
+/// The jitter keeps several bots (or several rooms) from hammering the homeserver in
+/// lockstep after it comes back up.
+fn backoff_for(attempt: u32) -> Duration {
+    let base = MIN_BACKOFF.saturating_mul(2u32.saturating_pow(attempt.min(6))).min(MAX_BACKOFF);
+
+    // A dedicated RNG would be overkill here; the clock is random enough for jitter.
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().subsec_nanos();
+    let jitter = Duration::from_millis(u64::from(nanos % 1_000));
+
+    (base + jitter).min(MAX_BACKOFF + Duration::from_secs(1))
+}
+
+/// Log in, retrying while the homeserver is unreachable or rate limiting us.
+///
+/// Without this the bot dies on startup whenever the Matrix stack is restarted: `/login` is
+/// one of the endpoints Synapse rate limits most aggressively, and with
+/// `restart: unless-stopped` a crash on 429 turns into a restart loop that makes the rate
+/// limiting worse.
+pub async fn login_with_retry(
+    client: &Client,
+    username: &str,
+    password: &str,
+    device_display_name: &str,
+    budget: Duration,
+) -> anyhow::Result<()> {
+    let deadline = SystemTime::now() + budget;
+    let mut attempt: u32 = 0;
+
+    loop {
+        let result = client
+            .matrix_auth()
+            .login_username(username, password)
+            .initial_device_display_name(device_display_name)
+            .send()
+            .await;
+
+        let error = match result {
+            Ok(_) => return Ok(()),
+            Err(error) => error,
+        };
+
+        let wait = match classify_error(&error) {
+            Retryable::No => {
+                return Err(anyhow::anyhow!("Login rejected by the homeserver: {error}"));
+            }
+            Retryable::Yes { retry_after } => retry_after
+                .unwrap_or_else(|| backoff_for(attempt))
+                .clamp(MIN_BACKOFF, MAX_BACKOFF),
+        };
+
+        let now = SystemTime::now();
+        if now + wait > deadline {
+            return Err(anyhow::anyhow!(
+                "Login still failing after {}s, giving up: {error}",
+                budget.as_secs()
+            ));
+        }
+
+        attempt += 1;
+        warn!(
+            attempt,
+            wait_secs = wait.as_secs(),
+            error = %error,
+            "Login failed, retrying"
+        );
+        tokio::time::sleep(wait).await;
+    }
+}
+
+/// Send a message into a room, logging instead of panicking when it fails.
+///
+/// The SDK already retries transient failures according to the client's `RequestConfig`, so
+/// by the time we see an error here it is either permanent or the retry budget is used up.
+/// Either way, a failed status message must not take the bot down.
+pub async fn send_message(room: &Room, content: RoomMessageEventContent) {
+    if let Err(error) = room.send(content).await {
+        error!(room_id = %room.room_id(), %error, "Failed to send message");
+    }
+}
+
+/// Log a summary of how the client is configured to retry, so the reason for long stalls is
+/// visible in the log.
+pub fn log_retry_configuration(retry_limit: usize, max_retry_time: Duration) {
+    info!(
+        retry_limit,
+        max_retry_time_secs = max_retry_time.as_secs(),
+        "HTTP retry configuration"
+    );
+}
