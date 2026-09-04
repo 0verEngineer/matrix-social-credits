@@ -87,6 +87,10 @@ hand any more.
 | `edge` | the current state of `main` | testing what is merged but not released |
 | `pr-42` | the newest build of pull request 42 | reviewing or testing a pull request |
 
+From `1.0.0` on there is also a bare major tag (`1`). While the project is still `0.x` that
+tag is deliberately not published: a `0` that wanders across every `0.x` release would
+promise a stability that does not exist yet.
+
 `edge` and `pr-*` are development builds. They can contain half-finished work and, unlike a
 release, are not guaranteed to have a working database migration path.
 
@@ -107,8 +111,18 @@ Pull requests from a fork are built but not pushed: GitHub deliberately withhold
 credentials from them. Build such a branch locally instead:
 
 ```sh
-docker buildx build --platform linux/amd64,linux/arm64 -t your-registry/matrix-social-credits:test --push .
+docker build -t matrix-social-credits:test .
 ```
+
+Or push it to a registry of your own, so a server can pull it:
+
+```sh
+docker buildx build -t your-registry/matrix-social-credits:test --push .
+```
+
+Add `--platform linux/amd64,linux/arm64` if you need both architectures; building for the
+other one locally needs `binfmt`/QEMU (`docker run --privileged --rm tonistiigi/binfmt
+--install all`) and is slow.
 
 ### Making a release
 
@@ -124,8 +138,8 @@ docker buildx build --platform linux/amd64,linux/arm64 -t your-registry/matrix-s
 
 The tag only triggers the release; the image tags are derived from `Cargo.toml`. If the two
 disagree, the workflow fails instead of publishing a mislabelled image. A version with a
-pre-release suffix (`0.2.0-rc.1`) is published under that exact tag only and does not move
-`latest`, `0.2` or `0`.
+pre-release suffix (`0.2.0-rc.1`) is published under that exact tag only and moves neither
+`latest` nor `0.2`.
 
 ### Repository secrets
 

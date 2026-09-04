@@ -30,6 +30,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   retrying on permanent errors, and no longer logs success after giving up.
 - Message bodies are HTML escaped and carry a real plaintext fallback. `!help` showed its
   `<emoji>` and `<social_credit>` placeholders as swallowed HTML tags.
+- The first reaction of a user new to a room is recorded again. The freshly created room data
+  was handed back with a placeholder row id, so writing the reaction hit a foreign key error:
+  it did not count towards the cooldown, and the same message could be scored twice.
 - `Dockerfile` is buildable from a fresh clone again; it copies `Cargo.lock`, which was in
   `.gitignore`.
 
