@@ -33,10 +33,6 @@ Matrix bot for a social credit system
 
 
 ---
-<details>
-    <summary>Screenshots</summary>
-</details>
-
 
 <!-- TABLE OF CONTENTS -->
 <details>
@@ -48,6 +44,11 @@ Matrix bot for a social credit system
     <li>
       <a href="#setup">Setup</a>
     </li>
+    <li><a href="#configuration">Configuration</a></li>
+    <li><a href="#commands">Commands</a></li>
+    <li><a href="#operating-the-bot">Operating the bot</a></li>
+    <li><a href="#limitations">Limitations</a></li>
+    <li><a href="#development">Development</a></li>
     <li><a href="#license">License</a></li>
     <li><a href="#contact">Contact</a></li>
   </ol>
@@ -62,27 +63,148 @@ Matrix bot for a social credit system
 
 <!-- SETUP -->
 ## Setup
-- Use the example docker-compose.yml file to setup the bot.
-- The bot user can be created with Element / Element Web or any other Matrix client that supports registering a new user.
+- Use the example `docker-compose.yml` file to setup the bot.
+- The bot user can be created with Element / Element Web or any other Matrix client that
+  supports registering a new user.
+- Invite the bot into a room; it accepts invitations automatically.
+- The admin registers the emojis that change the score, see [Commands](#commands).
 
-### Environment Variables
-- INITIAL_SOCIAL_CREDIT: The initial social credit that a user has 
-- ADMIN_USERNAME: Username of the user that will be the admin of the social credit system, user needs to be on the MATRIX_HOMESERVER_URL
-- MATRIX_USERNAME: Username of the bot user
-- MATRIX_PASSWORD: Password of the bot user
-- MATRIX_HOMESERVER_URL: Homeserver url of the bot user for example https://matrix.org
-- REACTION_LIMIT: Limits the social credit change reactions that are possible within REACTION_TIMESPAN
-- REACTION_TIMESPAN: Timespan in minutes for the REACTION_LIMIT, like a cooldown
-- DB_PATH: Path to the database file
 
-### Commands
-- !help: Shows the help message
-- !list: Lists all users and their social credit for the current room
-- !list-emoji: Lists all emojis that can be used to change the social credit for the current room
-- !register-emoji: To register an emoji
+<!-- CONFIGURATION -->
+## Configuration
+
+### Required environment variables
+| Variable | Description |
+| --- | --- |
+| `MATRIX_HOMESERVER_URL` | Homeserver URL of the bot user, for example `https://matrix.org`. Must include the scheme. |
+| `MATRIX_USERNAME` | Localpart of the bot user, for example `social-credit-system`. |
+| `MATRIX_PASSWORD` | Password of the bot user. Only used for the very first login, see [Sessions](#sessions). |
+| `ADMIN_USERNAME` | The user allowed to register emojis. Either a bare localpart (`alice`) or a full Matrix id (`@alice:example.org`). |
+| `INITIAL_SOCIAL_CREDIT` | Score a user starts with in a room. |
+| `REACTION_LIMIT` | How many score changing reactions a user may make within `REACTION_TIMESPAN`. |
+| `REACTION_TIMESPAN` | Length of that window, in minutes. |
+| `DB_PATH` | Path to the SQLite database file. |
+
+A bare `ADMIN_USERNAME` is resolved against the **server name of the bot's own Matrix id**,
+which the homeserver reports after login. That is not necessarily the host in
+`MATRIX_HOMESERVER_URL`: with `.well-known` delegation the URL can be
+`https://matrix.example.org` while user ids read `@alice:example.org`. Give the full Matrix id
+if you are unsure.
+
+### Optional environment variables
+| Variable | Default | Description |
+| --- | --- | --- |
+| `STORE_PATH` | `store` next to `DB_PATH` | Directory for the client state store and the saved session. |
+| `RUST_LOG` | `matrix_social_credits=info,matrix_sdk=warn` | Log filter, see [Logging](#logging). |
+| `HTTP_RETRY_LIMIT` | `10` | How often a single HTTP request is retried. |
+| `HTTP_MAX_RETRY_TIME_SECS` | `60` | Upper bound for the wait between two attempts of the same request. |
+| `LOGIN_RETRY_BUDGET_SECS` | `900` | How long the initial login keeps retrying before the bot gives up and exits. |
+| `EVENT_RETENTION_DAYS` | `30` | How long the deduplication markers in the `event` table are kept. |
+
+
+<!-- COMMANDS -->
+## Commands
+| Command | Who | Description |
+| --- | --- | --- |
+| `!help` | everyone | Show the command list. |
+| `!list` | everyone | Social credit scores of everyone currently in the room. |
+| `!list_emoji` | everyone | Registered emojis and their score change. |
+| `!register_emoji <emoji> <score>` | admin | Register an emoji, e.g. `!register_emoji 😑 -25`. |
+| `!unregister_emoji <emoji>` | admin | Remove a registered emoji again. |
+
+`-` and `_` are interchangeable in every command, and `!list_emoji`, `!list-emoji`,
+`!list_emojis` and `!list-emojis` all work.
 
 ### Usage
-- React with a registered emoji to a message to change the social credit of the user that sent the message
+React with a registered emoji to a message to change the score of the user who sent it.
+
+- You cannot change your own score.
+- Each message counts once per user; reacting a second time to the same message does nothing.
+- Variation selectors and skin tone modifiers are ignored, so 👍 and 👍🏽 are the same emoji as
+  far as the bot is concerned.
+
+
+<!-- OPERATING -->
+## Operating the bot
+
+### Sessions
+After the first successful login the session is written to `STORE_PATH/session.json` with
+`0600` permissions and reused on every following start. This matters for two reasons: a fresh
+login creates a new device each time, and `/login` is one of the endpoints Synapse rate limits
+hardest. The password is only needed again if the session is revoked.
+
+The same directory holds the client state store, including the sync token, so a restart
+resumes where the previous run stopped instead of replaying the timeline.
+
+Back up `STORE_PATH` together with the database, or the bot logs in again and re-syncs.
+
+### Rate limits and restarts
+Synapse answers with `429 M_LIMIT_EXCEEDED` fairly often, especially while the Matrix stack is
+coming back up. The bot handles this in three places:
+
+- Requests are retried according to `HTTP_RETRY_LIMIT` and `HTTP_MAX_RETRY_TIME_SECS`, and a
+  `retry_after` sent by the server is respected. Setting a retry limit is also what makes the
+  SDK retry plain connection failures at all, which is the case while the homeserver is down.
+- The login retries within `LOGIN_RETRY_BUDGET_SECS`. Permanent errors such as a wrong
+  password fail immediately instead of looping.
+- The sync loop survives transient errors. Only a permanent failure ends it.
+
+A single request can therefore take several minutes before it gives up. Run with
+`RUST_LOG=matrix_sdk=debug` to see the individual attempts.
+
+### Logging
+Logging goes to stdout via `tracing`. `RUST_LOG` takes the usual filter syntax:
+
+```
+RUST_LOG=matrix_social_credits=debug          # more detail from the bot
+RUST_LOG=matrix_social_credits=trace          # includes full event payloads
+RUST_LOG=matrix_social_credits=info,matrix_sdk=debug   # SDK request and retry detail
+```
+
+`trace` logs message contents. Do not leave it on in production.
+
+### Database
+SQLite, at `DB_PATH`, in WAL mode -- back up `*.db`, `*.db-wal` and `*.db-shm` together, or
+stop the bot first.
+
+The schema is versioned through `PRAGMA user_version` and migrated on start. Migrations run
+automatically and are idempotent, but take a backup before upgrading anyway.
+
+Scores of users who left a room are kept, so they are not reset if somebody rejoins. They are
+only hidden from `!list`.
+
+### Shutdown
+The bot handles `SIGTERM` and `Ctrl-C`, so `docker stop` shuts it down cleanly.
+
+
+<!-- LIMITATIONS -->
+## Limitations
+- **Encrypted rooms are not supported.** The bot is built without end-to-end encryption, so it
+  cannot read messages or reactions in encrypted rooms. Use it in unencrypted rooms.
+- There is exactly one admin, configured through `ADMIN_USERNAME`. There is no command to
+  promote anybody.
+- Removing a reaction does not undo the score change.
+- `REACTION_LIMIT`, `REACTION_TIMESPAN` and `INITIAL_SOCIAL_CREDIT` are global, not per room.
+- `!list` shows at most 100 users.
+
+
+<!-- DEVELOPMENT -->
+## Development
+The toolchain is pinned in `rust-toolchain.toml`; `rustup` picks it up automatically.
+
+```
+cargo test
+cargo clippy --all-targets -- -D warnings
+cargo fmt --all --check
+```
+
+Building the container image:
+
+```
+docker build -t matrix-social-credits .
+docker buildx build --platform linux/amd64,linux/arm64 -t matrix-social-credits .
+```
+
 
 <!-- LICENSE -->
 ## License
@@ -96,7 +218,7 @@ Distributed under the GNU General Public License v3 See `LICENSE` for more infor
 
 Julian Hackinger - dev@hackinger.net
 
-Project Link: [https://github.com/0verEngineer/matrix-social-credit](https://github.com/0verEngineer/matrix-social-credits)
+Project Link: [https://github.com/0verEngineer/matrix-social-credits](https://github.com/0verEngineer/matrix-social-credits)
 
 
 
@@ -110,4 +232,4 @@ Project Link: [https://github.com/0verEngineer/matrix-social-credit](https://git
 [issues-shield]: https://img.shields.io/github/issues/0verEngineer/matrix-social-credits.svg?style=for-the-badge
 [issues-url]: https://github.com/0verEngineer/matrix-social-credits/issues
 [license-shield]: https://img.shields.io/github/license/0verEngineer/matrix-social-credits.svg?style=for-the-badge
-[license-url]: https://github.com/0verEngineer/matrix-social-credits/blob/master/LICENSE.txt
+[license-url]: https://github.com/0verEngineer/matrix-social-credits/blob/main/LICENSE
