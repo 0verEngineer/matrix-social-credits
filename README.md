@@ -44,6 +44,7 @@ Matrix bot for a social credit system
     <li>
       <a href="#setup">Setup</a>
     </li>
+    <li><a href="#container-images">Container images</a></li>
     <li><a href="#configuration">Configuration</a></li>
     <li><a href="#commands">Commands</a></li>
     <li><a href="#operating-the-bot">Operating the bot</a></li>
@@ -68,6 +69,74 @@ Matrix bot for a social credit system
   supports registering a new user.
 - Invite the bot into a room; it accepts invitations automatically.
 - The admin registers the emojis that change the score, see [Commands](#commands).
+
+
+<!-- CONTAINER IMAGES -->
+## Container images
+
+Images are published to [Docker Hub](https://hub.docker.com/r/0verengineer/matrix-social-credits)
+for `linux/amd64` and `linux/arm64`. The version comes from `Cargo.toml`; nothing is tagged by
+hand any more.
+
+| Tag | Points at | Use it for |
+| --- | --- | --- |
+| `latest` | the newest release | you want updates without touching the compose file |
+| `0.1.0` | exactly that release | reproducible deployments, this is the recommended one |
+| `0.1` | the newest patch release of that minor version | bug fixes only, no new behaviour |
+| `0.2.0-rc.1` | a pre-release | testing a release candidate; never moves `latest` |
+| `edge` | the current state of `main` | testing what is merged but not released |
+| `pr-42` | the newest build of pull request 42 | reviewing or testing a pull request |
+
+`edge` and `pr-*` are development builds. They can contain half-finished work and, unlike a
+release, are not guaranteed to have a working database migration path.
+
+### Testing a pull request
+
+Every pull request from this repository gets its own image. The workflow summary of the
+`Publish` job prints the exact pull command, for example:
+
+```sh
+docker pull 0verengineer/matrix-social-credits:pr-42
+```
+
+There is also a `pr-42-<short sha>` tag that keeps pointing at one specific build, which is
+useful when the branch is force-pushed while you are testing. Both tags are deleted again when
+the pull request is closed.
+
+Pull requests from a fork are built but not pushed: GitHub deliberately withholds the registry
+credentials from them. Build such a branch locally instead:
+
+```sh
+docker buildx build --platform linux/amd64,linux/arm64 -t your-registry/matrix-social-credits:test --push .
+```
+
+### Making a release
+
+1. Bump `version` in `Cargo.toml` and run `cargo check` so `Cargo.lock` follows.
+2. Update `CHANGELOG.md`.
+3. Merge that into `main`.
+4. Tag the merge commit and push the tag:
+
+   ```sh
+   git tag v0.1.0
+   git push origin v0.1.0
+   ```
+
+The tag only triggers the release; the image tags are derived from `Cargo.toml`. If the two
+disagree, the workflow fails instead of publishing a mislabelled image. A version with a
+pre-release suffix (`0.2.0-rc.1`) is published under that exact tag only and does not move
+`latest`, `0.2` or `0`.
+
+### Repository secrets
+
+| Secret | Needed for |
+| --- | --- |
+| `DOCKERHUB_USERNAME` | pushing any image |
+| `DOCKERHUB_TOKEN` | pushing any image; needs the *Read, Write, Delete* scope so closed pull request tags can be cleaned up again |
+| `CODEBERG_TOKEN` | the Codeberg mirror |
+
+Without the Docker Hub secrets the workflow still builds both architectures and just says in
+the job summary that it did not push.
 
 
 <!-- CONFIGURATION -->
