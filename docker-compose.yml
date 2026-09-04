@@ -1,24 +1,42 @@
-version: '3'
-
 services:
   matrix-social-credit:
     image: 0verengineer/matrix-social-credits
     environment:
       # The initial social credit that a user has
       INITIAL_SOCIAL_CREDIT: 250
-      # Username of the user that will be the admin of the social credit system, user needs to be on the MATRIX_HOMESERVER_URL
+      # Username of the user that will be the admin of the social credit system.
+      # A bare localpart is resolved against the bot's own server name; a full user id
+      # (@name:server) is accepted as well.
       ADMIN_USERNAME: <username>
       # Username of the bot user
       MATRIX_USERNAME: social-credit-system
-      # Password of the bot user
+      # Password of the bot user. Only used for the very first login; afterwards the stored
+      # session in STORE_PATH is reused.
       MATRIX_PASSWORD: <matrix-admin-password>
       # Homeserver url of the bot user for example https://matrix.org
       MATRIX_HOMESERVER_URL: <your homeserver url>
-      # Only 2 social credit change reactions are possible within REACTION_TIMESPAN
+      # Only REACTION_LIMIT social credit change reactions are possible within
+      # REACTION_TIMESPAN
       REACTION_LIMIT: 2
       # Timespan in minutes for the REACTION_LIMIT, like a cooldown
       REACTION_TIMESPAN: 20
       DB_PATH: /data/social_credit.db
+      # Client state store and saved session
+      STORE_PATH: /data/store
+
+      # Optional, shown with their defaults:
+      # RUST_LOG: matrix_social_credits=info,matrix_sdk=warn
+      # HTTP_RETRY_LIMIT: 10
+      # HTTP_MAX_RETRY_TIME_SECS: 60
+      # LOGIN_RETRY_BUDGET_SECS: 900
+      # EVENT_RETENTION_DAYS: 30
     volumes:
       - ./data/:/data
     restart: unless-stopped
+    # The bot handles SIGTERM, give it a moment to finish the current sync.
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
