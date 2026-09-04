@@ -1,10 +1,11 @@
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
-use matrix_sdk::Room;
+use matrix_sdk::{Room, RoomMemberships};
 use matrix_sdk::ruma::{OwnedUserId, ServerName, UserId};
 use rusqlite::Connection;
 use crate::data::user::{find_all_users_with_room_data_in_db, find_user_in_db, insert_user, update_user, User, HtmlAndTextAnswer, UserType};
 use crate::data::user_room_data::{find_user_room_data_by_user_id_and_room_id, insert_user_room_data, UserRoomData};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 pub fn compare_user(user1: &User, user2: &User) -> bool {
     user1.name == user2.name && user1.url == user2.url
@@ -115,7 +116,16 @@ pub fn initial_admin_user_setup(conn: &Arc<Mutex<Connection>>, admin_user_id: &U
     info!(admin = %admin_user_id, "Admin user configured");
 }
 
-pub fn get_user_list_answer(conn: &Arc<Mutex<Connection>>, room: &Room, own_user_id: &UserId) -> HtmlAndTextAnswer {
+/// Build the `!list` answer for `room`.
+///
+/// The scores come from the database, but who is shown comes from the room's current member
+/// list. Previously this was a pure database query, and nothing ever removed a
+/// `user_room_data` row: once somebody had written a single message in a room they stayed in
+/// the list forever, including after leaving, being kicked or being banned.
+///
+/// Scores of users who left are kept in the database on purpose, so they are still there if
+/// somebody rejoins -- they are only hidden from the listing.
+pub async fn get_user_list_answer(conn: &Arc<Mutex<Connection>>, room: &Room, own_user_id: &UserId) -> HtmlAndTextAnswer {
     let (own_localpart, own_server) = split_user_id(own_user_id);
     let users_opt = find_all_users_with_room_data_in_db(
         conn,
@@ -128,16 +138,27 @@ pub fn get_user_list_answer(conn: &Arc<Mutex<Connection>>, room: &Room, own_user
         text: String::from("No Scores"),
     };
 
-    if users_opt.is_none() {
+    let Some(mut users) = users_opt else {
+        return empty_answer;
+    };
+
+    if users.is_empty() {
         return empty_answer;
     }
 
-    let mut text_body = String::from("Social Credit Scores: ");
-    let mut html_body = String::from("<h3>Social Credit Scores:</h3><br>");
+    let mut note = "";
+    match current_room_members(room).await {
+        Some(members) => {
+            users.retain(|user| members.contains(&(user.name.clone(), user.url.clone())));
+        }
+        None => {
+            // The homeserver did not hand out the member list (rate limited, or down). Show
+            // the stored scores rather than nothing, but say that the list may be stale.
+            note = " (member list unavailable, this may include users who left)";
+        }
+    }
 
-    let mut users = users_opt.unwrap();
-
-    if users.len() == 0 {
+    if users.is_empty() {
         return empty_answer;
     }
 
@@ -148,27 +169,38 @@ pub fn get_user_list_answer(conn: &Arc<Mutex<Connection>>, room: &Room, own_user
         b_credit.cmp(&a_credit)
     });
 
-    for user in users {
-        let room_data_opt = user.room_data;
-        if room_data_opt.is_none() {
-            continue;
-        }
-        let room_data = room_data_opt.unwrap();
-        text_body.push_str(&format!("{}: {},", user.name, room_data.social_credit));
-        html_body.push_str(&format!("{}: <b>{}</b><br>", user.name, room_data.social_credit));
-    }
+    let mut text_entries: Vec<String> = Vec::with_capacity(users.len());
+    let mut html_entries: Vec<String> = Vec::with_capacity(users.len());
 
-    // Remove the last comma
-    if text_body.len() >= 1 {
-        text_body.remove(text_body.len() - 1);
-    }
-    // Remove the last <br>
-    if html_body.len() >= 4 {
-        html_body.truncate(html_body.len() - 4);
+    for user in users {
+        let Some(room_data) = user.room_data else {
+            continue;
+        };
+        text_entries.push(format!("{}: {}", user.name, room_data.social_credit));
+        html_entries.push(format!("{}: <b>{}</b>", user.name, room_data.social_credit));
     }
 
     HtmlAndTextAnswer {
-        html: html_body.to_string(),
-        text: text_body.to_string(),
+        text: format!("Social Credit Scores{}: {}", note, text_entries.join(", ")),
+        html: format!(
+            "<h3>Social Credit Scores{}:</h3><br>{}",
+            note,
+            html_entries.join("<br>")
+        ),
+    }
+}
+
+/// The users currently joined to `room`, in the `(localpart, server name)` shape the `user`
+/// table stores.
+///
+/// Returns `None` when the member list could not be obtained, so callers can tell "nobody is
+/// in the room" apart from "we do not know who is in the room".
+async fn current_room_members(room: &Room) -> Option<HashSet<(String, String)>> {
+    match room.members(RoomMemberships::JOIN).await {
+        Ok(members) => Some(members.iter().map(|member| split_user_id(member.user_id())).collect()),
+        Err(error) => {
+            warn!(room_id = %room.room_id(), %error, "Unable to load the room member list");
+            None
+        }
     }
 }

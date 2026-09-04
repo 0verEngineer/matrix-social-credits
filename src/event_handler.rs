@@ -257,7 +257,7 @@ impl EventHandler {
     }
 
     async fn handle_list(&self, room: &Room) {
-        let answer = get_user_list_answer(&self.conn, room, &self.own_user_id);
+        let answer = get_user_list_answer(&self.conn, room, &self.own_user_id).await;
         send_message(room, RoomMessageEventContent::text_html(answer.text, answer.html)).await;
     }
 
