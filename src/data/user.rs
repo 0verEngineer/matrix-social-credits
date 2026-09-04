@@ -1,5 +1,5 @@
 use std::sync::{Arc, Mutex};
-use rusqlite::{Connection, Error, params, Params, Statement, ToSql};
+use rusqlite::{Connection, Error, params, Params, Statement};
 use crate::data::user_room_data::UserRoomData;
 use tracing::{error, warn};
 
@@ -38,14 +38,7 @@ pub fn insert_user(conn: &Arc<Mutex<Connection>>, user: &User) -> Result<(), Err
     let user_type_as_int = get_user_type_as_int(user);
     let connection = conn.lock().unwrap();
 
-    connection.execute(
-        sql,
-        &[
-            &user.name as &dyn ToSql,
-            &user.url as &dyn ToSql,
-            &user_type_as_int as &dyn ToSql
-        ]
-    )?;
+    connection.execute(sql, params![user.name, user.url, user_type_as_int])?;
 
     Ok(())
 }
@@ -55,24 +48,17 @@ pub fn update_user(conn: &Arc<Mutex<Connection>>, user: &User) -> Result<(), Err
     let connection = conn.lock().unwrap();
     let user_type_as_int = get_user_type_as_int(user);
 
-    connection.execute(
-        sql,
-        &[
-            &user_type_as_int as &dyn ToSql,
-            &user.id as &dyn ToSql,
-        ]
-    )?;
+    connection.execute(sql, params![user_type_as_int, user.id])?;
 
     Ok(())
 }
 
 fn get_user_type_as_int(user: &User) -> i32 {
-    let user_type_as_int = match user.user_type {
+    match user.user_type {
         UserType::Default => 0,
         UserType::Moderator => 1,
         UserType::Admin => 2,
-    };
-    user_type_as_int
+    }
 }
 
 pub fn find_user_in_db(
@@ -112,7 +98,7 @@ pub fn find_all_users_with_room_data_in_db(
     let params = params![room_id, own_localpart, own_server_name];
     let connection = conn.lock().unwrap();
 
-    let mut stmt = match connection.prepare(&sql) {
+    let mut stmt = match connection.prepare(sql) {
         Ok(stmt) => stmt,
         Err(e) => {
             error!(error = %e, "Database error");
@@ -137,7 +123,7 @@ fn do_get_user_sql<P: Params>(
     params: P,
 ) -> Result<Vec<User>, Error> {
     let connection = conn.lock().unwrap();
-    let mut stmt = match connection.prepare(&sql) {
+    let mut stmt = match connection.prepare(sql) {
         Ok(stmt) => stmt,
         Err(e) => {
             error!(error = %e, "Database error");
@@ -145,9 +131,7 @@ fn do_get_user_sql<P: Params>(
         }
     };
 
-    let users = do_get_user_sql_inner(params, &mut stmt, false);
-
-    return users;
+    do_get_user_sql_inner(params, &mut stmt, false)
 }
 
 fn do_get_user_sql_inner<P: Params>(params: P, stmt: &mut Statement, with_room_data: bool) -> Result<Vec<User>, Error> {

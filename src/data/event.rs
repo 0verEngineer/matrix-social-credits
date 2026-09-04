@@ -59,7 +59,7 @@ fn do_get_event_sql<P: Params>(
     params: P,
 ) -> Result<Vec<Event>, Error> {
     let connection = conn.lock().unwrap();
-    let mut stmt = match connection.prepare(&sql) {
+    let mut stmt = match connection.prepare(sql) {
         Ok(stmt) => stmt,
         Err(e) => {
             error!(error = %e, "Database error");
@@ -75,7 +75,7 @@ fn do_get_event_sql<P: Params>(
         })
     }).and_then(|mapped_rows| mapped_rows.collect());
 
-    return events;
+    events
 }
 
 

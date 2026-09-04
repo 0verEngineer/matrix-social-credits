@@ -25,14 +25,7 @@ pub fn insert_emoji(conn: &Arc<Mutex<Connection>>, emoji: &Emoji) -> Result<(), 
     let sql = "INSERT INTO emoji (room_id, emoji, social_credit) VALUES (?1, ?2, ?3)";
     let connection = conn.lock().unwrap();
 
-    connection.execute(
-        sql,
-        &[
-            &emoji.room_id as &dyn rusqlite::ToSql,
-            &emoji.emoji as &dyn rusqlite::ToSql,
-            &emoji.social_credit as &dyn rusqlite::ToSql,
-        ]
-    )?;
+    connection.execute(sql, params![emoji.room_id, emoji.emoji, emoji.social_credit])?;
 
     Ok(())
 }
@@ -72,7 +65,7 @@ fn do_get_emoji_sql<P:Params>(
     params: P,
 ) -> Result<Vec<Emoji>, Error> {
     let connection = conn.lock().unwrap();
-    let mut stmt = match connection.prepare(&sql) {
+    let mut stmt = match connection.prepare(sql) {
         Ok(stmt) => stmt,
         Err(e) => {
             error!(error = %e, "Database error");
@@ -89,7 +82,7 @@ fn do_get_emoji_sql<P:Params>(
         })
     }).and_then(|mapped_rows| mapped_rows.collect());
 
-    return emoji;
+    emoji
 }
 
 pub fn delete_emoji(conn: &Arc<Mutex<Connection>>, emoji: &String, room_id: &String) -> Result<usize, Error> {

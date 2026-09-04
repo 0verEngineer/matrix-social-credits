@@ -74,16 +74,14 @@ pub fn setup_user(conn: &Arc<Mutex<Connection>>, room: Option<Room>, user_id: &U
 }
 
 fn setup_user_room_data_for_room(conn: &Arc<Mutex<Connection>>, room: Option<Room>, user: &mut User, initial_social_credit: i32) {
-    if room.is_some() {
-        let room = room.unwrap();
-        let room_data = find_user_room_data_by_user_id_and_room_id(conn, user.id, &room.room_id().to_string());
-        if room_data.is_ok() {
-            let room_data = room_data.unwrap();
+    if let Some(room) = room {
+        let room_id = room.room_id().to_string();
+
+        if let Ok(room_data) = find_user_room_data_by_user_id_and_room_id(conn, user.id, &room_id) {
             user.room_data = Some(room_data);
             return;
         }
 
-        let room_id = room.room_id().to_string();
         debug!(user = %user.name, %room_id, "Room data for user not found in db, creating");
 
         let room_data = UserRoomData {
