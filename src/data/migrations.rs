@@ -32,8 +32,7 @@ pub fn open_and_migrate(path: impl AsRef<Path>) -> Result<Connection, Error> {
     // journal_mode returns the resulting mode as a row, so it cannot go through
     // pragma_update. WAL lets a reader and a writer work at the same time, which the previous
     // rollback journal did not.
-    let journal_mode: String =
-        conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
+    let journal_mode: String = conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
     if !journal_mode.eq_ignore_ascii_case("wal") {
         warn!(journal_mode, "Could not switch the database to WAL mode");
     }
@@ -141,7 +140,10 @@ fn migrate_to_v2(conn: &Connection) -> Result<(), Error> {
 
     // Existing rows get the current time so the first retention run does not wipe the whole
     // deduplication history at once.
-    conn.execute("UPDATE event SET seen_at = ?1 WHERE seen_at = 0", params![now_epoch_secs()])?;
+    conn.execute(
+        "UPDATE event SET seen_at = ?1 WHERE seen_at = 0",
+        params![now_epoch_secs()],
+    )?;
     conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_event_seen_at ON event (seen_at);")?;
 
     Ok(())
@@ -162,7 +164,10 @@ fn normalize_stored_emojis(conn: &Connection) -> Result<(), Error> {
         let normalized = normalize_emoji(&emoji);
         if normalized != emoji {
             info!(from = %emoji, to = %normalized, "Normalizing a registered emoji");
-            conn.execute("UPDATE emoji SET emoji = ?1 WHERE id = ?2", params![normalized, id])?;
+            conn.execute(
+                "UPDATE emoji SET emoji = ?1 WHERE id = ?2",
+                params![normalized, id],
+            )?;
         }
     }
 
@@ -186,21 +191,25 @@ fn now_epoch_secs() -> i64 {
         .unwrap_or(0)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::{legacy_db, test_db};
 
     fn count(conn: &Connection, table: &str) -> i64 {
-        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0)).unwrap()
+        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })
+        .unwrap()
     }
 
     #[test]
     fn a_fresh_database_ends_up_at_the_current_version() {
         let db = test_db();
         let conn = db.lock().unwrap();
-        let version: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        let version: i32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
     }
 
@@ -208,9 +217,17 @@ mod tests {
     fn user_name_and_url_are_unique() {
         let db = test_db();
         let conn = db.lock().unwrap();
-        conn.execute("INSERT INTO user (name, url, user_type) VALUES ('a', 'b', 0)", []).unwrap();
+        conn.execute(
+            "INSERT INTO user (name, url, user_type) VALUES ('a', 'b', 0)",
+            [],
+        )
+        .unwrap();
         assert!(
-            conn.execute("INSERT INTO user (name, url, user_type) VALUES ('a', 'b', 0)", []).is_err(),
+            conn.execute(
+                "INSERT INTO user (name, url, user_type) VALUES ('a', 'b', 0)",
+                []
+            )
+            .is_err(),
             "a second user with the same name and url must be rejected"
         );
     }
@@ -219,12 +236,24 @@ mod tests {
     fn an_emoji_can_only_be_registered_once_per_room() {
         let db = test_db();
         let conn = db.lock().unwrap();
-        conn.execute("INSERT INTO emoji (room_id, emoji, social_credit) VALUES ('!r', '😑', -25)", []).unwrap();
+        conn.execute(
+            "INSERT INTO emoji (room_id, emoji, social_credit) VALUES ('!r', '😑', -25)",
+            [],
+        )
+        .unwrap();
         assert!(
-            conn.execute("INSERT INTO emoji (room_id, emoji, social_credit) VALUES ('!r', '😑', 5)", []).is_err()
+            conn.execute(
+                "INSERT INTO emoji (room_id, emoji, social_credit) VALUES ('!r', '😑', 5)",
+                []
+            )
+            .is_err()
         );
         // ... but the same emoji in a different room is fine.
-        conn.execute("INSERT INTO emoji (room_id, emoji, social_credit) VALUES ('!other', '😑', 5)", []).unwrap();
+        conn.execute(
+            "INSERT INTO emoji (room_id, emoji, social_credit) VALUES ('!other', '😑', 5)",
+            [],
+        )
+        .unwrap();
     }
 
     /// The production database had no uniqueness at all, and setup_user's
@@ -243,14 +272,26 @@ mod tests {
 
         migrate(&conn).unwrap();
 
-        assert_eq!(count(&conn, "user"), 2, "the duplicated alice must be merged away");
+        assert_eq!(
+            count(&conn, "user"),
+            2,
+            "the duplicated alice must be merged away"
+        );
         assert_eq!(count(&conn, "user_room_data"), 2);
         // $m1 was recorded twice for what turned out to be the same user.
         assert_eq!(count(&conn, "user_reaction"), 3);
 
-        let surviving_user: i32 =
-            conn.query_row("SELECT user_id FROM user_room_data WHERE room_id='!r' AND social_credit=250", [], |r| r.get(0)).unwrap();
-        assert_eq!(surviving_user, 1, "room data must point at the surviving user");
+        let surviving_user: i32 = conn
+            .query_row(
+                "SELECT user_id FROM user_room_data WHERE room_id='!r' AND social_credit=250",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            surviving_user, 1,
+            "room data must point at the surviving user"
+        );
 
         let orphans: i64 = conn
             .query_row(
@@ -259,7 +300,10 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(orphans, 0, "no reaction may be left pointing at a deleted row");
+        assert_eq!(
+            orphans, 0,
+            "no reaction may be left pointing at a deleted row"
+        );
     }
 
     /// Entries registered before normalization existed carry variation selectors or skin
@@ -287,25 +331,39 @@ mod tests {
     #[test]
     fn migration_is_idempotent() {
         let conn = legacy_db();
-        conn.execute("INSERT INTO user (id, name, url, user_type) VALUES (1,'a','b',0)", []).unwrap();
+        conn.execute(
+            "INSERT INTO user (id, name, url, user_type) VALUES (1,'a','b',0)",
+            [],
+        )
+        .unwrap();
 
         migrate(&conn).unwrap();
         migrate(&conn).unwrap();
 
         assert_eq!(count(&conn, "user"), 1);
-        let version: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        let version: i32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
     }
 
     #[test]
     fn existing_event_rows_survive_the_first_retention_run() {
         let conn = legacy_db();
-        conn.execute("INSERT INTO event (id, event_type, handled) VALUES ('$e1','m.reaction',1)", []).unwrap();
+        conn.execute(
+            "INSERT INTO event (id, event_type, handled) VALUES ('$e1','m.reaction',1)",
+            [],
+        )
+        .unwrap();
 
         migrate(&conn).unwrap();
         cleanup_events(&conn, 30).unwrap();
 
-        assert_eq!(count(&conn, "event"), 1, "seen_at must be backfilled, not left at 0");
+        assert_eq!(
+            count(&conn, "event"),
+            1,
+            "seen_at must be backfilled, not left at 0"
+        );
     }
 
     #[test]

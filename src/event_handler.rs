@@ -1,10 +1,3 @@
-use std::sync::{Arc, Mutex};
-use matrix_sdk::{Room, RoomState};
-use matrix_sdk::ruma::{events};
-use matrix_sdk::ruma::events::{AnySyncMessageLikeEvent, AnySyncTimelineEvent};
-use matrix_sdk::ruma::events::room::message::{MessageType, Relation};
-use matrix_sdk::ruma::{OwnedUserId, UserId};
-use rusqlite::Connection;
 use crate::data::emoji::{Emoji, delete_emoji, find_emoji_in_db, insert_emoji};
 use crate::data::event::{Event, find_event_in_db, insert_event};
 use crate::data::user::{User, UserType};
@@ -13,8 +6,14 @@ use crate::utils::emoji_util::{get_emoji_list_answer, normalize_emoji};
 use crate::utils::matrix_util::send_message;
 use crate::utils::message::{escape_html, notice_html, notice_plain};
 use crate::utils::user_util::{compare_user, get_user_list_answer, setup_user};
+use matrix_sdk::ruma::events;
+use matrix_sdk::ruma::events::room::message::{MessageType, Relation};
+use matrix_sdk::ruma::events::{AnySyncMessageLikeEvent, AnySyncTimelineEvent};
+use matrix_sdk::ruma::{OwnedUserId, UserId};
+use matrix_sdk::{Room, RoomState};
+use rusqlite::Connection;
+use std::sync::{Arc, Mutex};
 use tracing::{debug, error, trace};
-
 
 pub struct EventHandler {
     conn: Arc<Mutex<Connection>>,
@@ -30,7 +29,13 @@ pub struct EventHandler {
 }
 
 impl EventHandler {
-    pub fn new(conn: Arc<Mutex<Connection>>, own_user_id: OwnedUserId, initial_social_credit: i32, reaction_period_minutes: i32, reaction_limit: i32) -> Self {
+    pub fn new(
+        conn: Arc<Mutex<Connection>>,
+        own_user_id: OwnedUserId,
+        initial_social_credit: i32,
+        reaction_period_minutes: i32,
+        reaction_limit: i32,
+    ) -> Self {
         EventHandler {
             conn,
             own_user_id,
@@ -47,10 +52,20 @@ impl EventHandler {
             return;
         }
 
-        if self.check_and_handle_event_already_handled(&event) { return; }
-        if self.handle_sender_is_the_bot(&event) { return; }
+        if self.check_and_handle_event_already_handled(&event) {
+            return;
+        }
+        if self.handle_sender_is_the_bot(&event) {
+            return;
+        }
 
-        let sender = setup_user(&self.conn, Some(room.clone()), event.sender(), UserType::Default, self.initial_social_credit);
+        let sender = setup_user(
+            &self.conn,
+            Some(room.clone()),
+            event.sender(),
+            UserType::Default,
+            self.initial_social_credit,
+        );
         if sender.is_none() {
             debug!(sender = %event.sender(), "Unable to resolve the sender of the event");
             return;
@@ -65,7 +80,9 @@ impl EventHandler {
                 return;
             }
 
-            if let events::AnyMessageLikeEventContent::Reaction(content) = event.original_content().unwrap() {
+            if let events::AnyMessageLikeEventContent::Reaction(content) =
+                event.original_content().unwrap()
+            {
                 trace!(?content, "Reaction content");
                 let emoji_text = normalize_emoji(&content.relates_to.key);
 
@@ -111,7 +128,13 @@ impl EventHandler {
                         return;
                     }
 
-                    let recipient_opt = setup_user(&self.conn, Some(room.clone()), recipient_user_id, UserType::Default, self.initial_social_credit);
+                    let recipient_opt = setup_user(
+                        &self.conn,
+                        Some(room.clone()),
+                        recipient_user_id,
+                        UserType::Default,
+                        self.initial_social_credit,
+                    );
                     let Some(mut recipient) = recipient_opt else {
                         debug!(user = %recipient_user_id, "Unable to resolve the recipient of the reaction");
                         return;
@@ -119,9 +142,10 @@ impl EventHandler {
 
                     let annotated_message_id = message_like_event.event_id().to_string();
 
-                    if sender_user_room_data
-                        .has_user_already_reacted_to_message_event_id(&self.conn, &annotated_message_id)
-                    {
+                    if sender_user_room_data.has_user_already_reacted_to_message_event_id(
+                        &self.conn,
+                        &annotated_message_id,
+                    ) {
                         debug!(sender = %format_args!("@{}:{}", sender.name, sender.url), event_id = %event.event_id(), "Sender already reacted to this message event");
                         return;
                     }
@@ -140,11 +164,12 @@ impl EventHandler {
                     // actually count. Checking it up front meant telling a user to wait for a
                     // reaction that was going to be dropped anyway -- a duplicate, or a
                     // reaction to their own message.
-                    let time_till_user_can_react = sender_user_room_data.get_time_till_user_can_react(
-                        &self.conn,
-                        self.reaction_period_minutes,
-                        self.reaction_limit,
-                    );
+                    let time_till_user_can_react = sender_user_room_data
+                        .get_time_till_user_can_react(
+                            &self.conn,
+                            self.reaction_period_minutes,
+                            self.reaction_limit,
+                        );
                     if time_till_user_can_react > 0 {
                         let minutes = time_till_user_can_react / 60;
                         let seconds = time_till_user_can_react % 60;
@@ -173,13 +198,20 @@ impl EventHandler {
                         }
                     };
 
-                    sender.room_data.unwrap().add_reaction(&self.conn, &annotated_message_id);
+                    sender
+                        .room_data
+                        .unwrap()
+                        .add_reaction(&self.conn, &annotated_message_id);
 
                     // The plaintext body used to be the HTML string, so clients without HTML
                     // rendering and push notifications showed the raw <b> tags.
                     let plain = format!(
                         "{} changed {}'s Social Credit Score using {} from {} to {}",
-                        sender.name, recipient.name, emoji.emoji, old_social_credit, new_social_credit
+                        sender.name,
+                        recipient.name,
+                        emoji.emoji,
+                        old_social_credit,
+                        new_social_credit
                     );
                     let html = format!(
                         "<b>{}</b> changed <b>{}'s</b> Social Credit Score using {} from <b>{}</b> to <b>{}</b>",
@@ -202,10 +234,14 @@ impl EventHandler {
 
             let sender = sender.unwrap();
 
-            if let events::AnyMessageLikeEventContent::RoomMessage(content) = event.original_content().unwrap() {
+            if let events::AnyMessageLikeEventContent::RoomMessage(content) =
+                event.original_content().unwrap()
+            {
                 match content.msgtype {
-                    MessageType::Text(..) => {},
-                    _ => { return; }
+                    MessageType::Text(..) => {}
+                    _ => {
+                        return;
+                    }
                 }
 
                 // An edit carries the new text prefixed with "* " in its fallback body. The
@@ -218,7 +254,8 @@ impl EventHandler {
                     return;
                 }
 
-                self.handle_command(&room, &sender, content.body().trim()).await;
+                self.handle_command(&room, &sender, content.body().trim())
+                    .await;
             }
         }
     }
@@ -305,8 +342,14 @@ impl EventHandler {
         // were swallowed by every client as unknown HTML tags, so the help text read
         // "!register_emoji  : Register an emoji ...".
         let commands = [
-            ("!list", "List all users and their social credit score for the current room"),
-            ("!list_emoji", "List all registered emojis and their social credit score for the current room"),
+            (
+                "!list",
+                "List all users and their social credit score for the current room",
+            ),
+            (
+                "!list_emoji",
+                "List all registered emojis and their social credit score for the current room",
+            ),
             (
                 "!register_emoji <emoji> <social_credit>",
                 "Register an emoji with a social credit score for the current room. Example: !register_emoji 😑 -25",
@@ -318,7 +361,11 @@ impl EventHandler {
         ];
 
         let plain = std::iter::once("Commands:".to_owned())
-            .chain(commands.iter().map(|(usage, description)| format!("- {usage}: {description}")))
+            .chain(
+                commands
+                    .iter()
+                    .map(|(usage, description)| format!("- {usage}: {description}")),
+            )
             .collect::<Vec<_>>()
             .join("\n");
 
@@ -425,11 +472,7 @@ impl EventHandler {
             return;
         }
 
-        send_message(
-            room,
-            notice_plain(format!("Emoji removed: {emoji_text}")),
-        )
-        .await;
+        send_message(room, notice_plain(format!("Emoji removed: {emoji_text}"))).await;
     }
 
     fn is_user_the_bot(&self, user_id: &UserId) -> bool {
@@ -462,7 +505,10 @@ mod tests {
 
     #[test]
     fn keeps_the_arguments() {
-        assert_eq!(split_command("!register_emoji 😑 -25"), ("!register_emoji", "😑 -25"));
+        assert_eq!(
+            split_command("!register_emoji 😑 -25"),
+            ("!register_emoji", "😑 -25")
+        );
     }
 
     /// split(" ") plus a "drop a leading empty part" special case broke on this.

@@ -9,7 +9,8 @@ use crate::data::migrations::migrate;
 /// A migrated in-memory database, in the shape the production code expects.
 pub fn test_db() -> Arc<Mutex<Connection>> {
     let conn = Connection::open_in_memory().expect("in-memory database");
-    conn.pragma_update(None, "foreign_keys", true).expect("foreign keys");
+    conn.pragma_update(None, "foreign_keys", true)
+        .expect("foreign keys");
     migrate(&conn).expect("migrations");
     Arc::new(Mutex::new(conn))
 }
@@ -18,7 +19,8 @@ pub fn test_db() -> Arc<Mutex<Connection>> {
 /// migration path can be exercised against realistic bad data.
 pub fn legacy_db() -> Connection {
     let conn = Connection::open_in_memory().expect("in-memory database");
-    conn.pragma_update(None, "foreign_keys", false).expect("foreign keys");
+    conn.pragma_update(None, "foreign_keys", false)
+        .expect("foreign keys");
     conn.execute_batch(
         "
         CREATE TABLE user (id INTEGER PRIMARY KEY, name TEXT NOT NULL, url TEXT NOT NULL, user_type INTEGER NOT NULL);

@@ -1,11 +1,16 @@
+use crate::data::user::{
+    HtmlAndTextAnswer, User, UserType, find_all_users_with_room_data_in_db, find_user_in_db,
+    insert_user, update_user,
+};
+use crate::data::user_room_data::{
+    UserRoomData, find_user_room_data_by_user_id_and_room_id, insert_user_room_data,
+};
+use crate::utils::message::escape_html;
+use matrix_sdk::ruma::{OwnedUserId, ServerName, UserId};
+use matrix_sdk::{Room, RoomMemberships};
+use rusqlite::Connection;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
-use matrix_sdk::{Room, RoomMemberships};
-use matrix_sdk::ruma::{OwnedUserId, ServerName, UserId};
-use rusqlite::Connection;
-use crate::data::user::{find_all_users_with_room_data_in_db, find_user_in_db, insert_user, update_user, User, HtmlAndTextAnswer, UserType};
-use crate::data::user_room_data::{find_user_room_data_by_user_id_and_room_id, insert_user_room_data, UserRoomData};
-use crate::utils::message::escape_html;
 use tracing::{debug, error, info, warn};
 
 /// Upper bound on how many users a single `!list` answer shows.
@@ -22,7 +27,10 @@ pub fn compare_user(user1: &User, user2: &User) -> bool {
 /// The database predates this and keeps localpart and server name in separate columns, so
 /// this is the single place that maps between the two representations.
 pub fn split_user_id(user_id: &UserId) -> (String, String) {
-    (user_id.localpart().to_owned(), user_id.server_name().to_string())
+    (
+        user_id.localpart().to_owned(),
+        user_id.server_name().to_string(),
+    )
 }
 
 /// Build a user id from an `ADMIN_USERNAME` value.
@@ -32,7 +40,10 @@ pub fn split_user_id(user_id: &UserId) -> (String, String) {
 /// own user id -- *not* the host of `MATRIX_HOMESERVER_URL`. With `.well-known` delegation
 /// those two differ (`matrix.example.org` vs `example.org`), and deriving the domain from the
 /// URL used to hand out an admin id that never matched a real user.
-pub fn resolve_configured_user_id(configured: &str, server_name: &ServerName) -> Option<OwnedUserId> {
+pub fn resolve_configured_user_id(
+    configured: &str,
+    server_name: &ServerName,
+) -> Option<OwnedUserId> {
     let configured = configured.trim();
 
     if configured.starts_with('@') {
@@ -42,7 +53,13 @@ pub fn resolve_configured_user_id(configured: &str, server_name: &ServerName) ->
     UserId::parse(format!("@{configured}:{server_name}")).ok()
 }
 
-pub fn setup_user(conn: &Arc<Mutex<Connection>>, room: Option<Room>, user_id: &UserId, user_type: UserType, initial_social_credit: i32) -> Option<User> {
+pub fn setup_user(
+    conn: &Arc<Mutex<Connection>>,
+    room: Option<Room>,
+    user_id: &UserId,
+    user_type: UserType,
+    initial_social_credit: i32,
+) -> Option<User> {
     let (username, domain) = split_user_id(user_id);
 
     let user_opt = find_user_in_db(conn, &username, &domain);
@@ -73,7 +90,12 @@ pub fn setup_user(conn: &Arc<Mutex<Connection>>, room: Option<Room>, user_id: &U
     None
 }
 
-fn setup_user_room_data_for_room(conn: &Arc<Mutex<Connection>>, room: Option<Room>, user: &mut User, initial_social_credit: i32) {
+fn setup_user_room_data_for_room(
+    conn: &Arc<Mutex<Connection>>,
+    room: Option<Room>,
+    user: &mut User,
+    initial_social_credit: i32,
+) {
     if let Some(room) = room {
         let room_id = room.room_id().to_string();
 
@@ -128,7 +150,11 @@ pub fn initial_admin_user_setup(conn: &Arc<Mutex<Connection>>, admin_user_id: &U
 ///
 /// Scores of users who left are kept in the database on purpose, so they are still there if
 /// somebody rejoins -- they are only hidden from the listing.
-pub async fn get_user_list_answer(conn: &Arc<Mutex<Connection>>, room: &Room, own_user_id: &UserId) -> HtmlAndTextAnswer {
+pub async fn get_user_list_answer(
+    conn: &Arc<Mutex<Connection>>,
+    room: &Room,
+    own_user_id: &UserId,
+) -> HtmlAndTextAnswer {
     let (own_localpart, own_server) = split_user_id(own_user_id);
     let users_opt = find_all_users_with_room_data_in_db(
         conn,
@@ -184,7 +210,10 @@ pub async fn get_user_list_answer(conn: &Arc<Mutex<Connection>>, room: &Room, ow
             continue;
         };
         let rank = index + 1;
-        text_entries.push(format!("{}. {}: {}", rank, user.name, room_data.social_credit));
+        text_entries.push(format!(
+            "{}. {}: {}",
+            rank, user.name, room_data.social_credit
+        ));
         html_entries.push(format!(
             "{}. {}: <b>{}</b>",
             rank,
@@ -200,7 +229,10 @@ pub async fn get_user_list_answer(conn: &Arc<Mutex<Connection>>, room: &Room, ow
     };
 
     HtmlAndTextAnswer {
-        text: format!("Social Credit Scores{note}{cut_note}:\n{}", text_entries.join("\n")),
+        text: format!(
+            "Social Credit Scores{note}{cut_note}:\n{}",
+            text_entries.join("\n")
+        ),
         html: format!(
             "<h3>Social Credit Scores{}{}:</h3>{}",
             escape_html(note),
@@ -217,7 +249,12 @@ pub async fn get_user_list_answer(conn: &Arc<Mutex<Connection>>, room: &Room, ow
 /// in the room" apart from "we do not know who is in the room".
 async fn current_room_members(room: &Room) -> Option<HashSet<(String, String)>> {
     match room.members(RoomMemberships::JOIN).await {
-        Ok(members) => Some(members.iter().map(|member| split_user_id(member.user_id())).collect()),
+        Ok(members) => Some(
+            members
+                .iter()
+                .map(|member| split_user_id(member.user_id()))
+                .collect(),
+        ),
         Err(error) => {
             warn!(room_id = %room.room_id(), %error, "Unable to load the room member list");
             None
@@ -299,13 +336,29 @@ mod db_tests {
     fn setting_up_the_same_user_twice_keeps_one_row() {
         let db = test_db();
 
-        let first = setup_user(&db, None, user_id!("@alice:example.org"), UserType::Default, 250).unwrap();
-        let second = setup_user(&db, None, user_id!("@alice:example.org"), UserType::Default, 250).unwrap();
+        let first = setup_user(
+            &db,
+            None,
+            user_id!("@alice:example.org"),
+            UserType::Default,
+            250,
+        )
+        .unwrap();
+        let second = setup_user(
+            &db,
+            None,
+            user_id!("@alice:example.org"),
+            UserType::Default,
+            250,
+        )
+        .unwrap();
 
         assert_eq!(first.id, second.id);
 
         let conn = db.lock().unwrap();
-        let users: i64 = conn.query_row("SELECT COUNT(*) FROM user", [], |r| r.get(0)).unwrap();
+        let users: i64 = conn
+            .query_row("SELECT COUNT(*) FROM user", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(users, 1);
     }
 
@@ -313,7 +366,14 @@ mod db_tests {
     fn stores_the_localpart_and_the_server_name_separately() {
         let db = test_db();
 
-        let created = setup_user(&db, None, user_id!("@alice:example.org"), UserType::Default, 250).unwrap();
+        let created = setup_user(
+            &db,
+            None,
+            user_id!("@alice:example.org"),
+            UserType::Default,
+            250,
+        )
+        .unwrap();
 
         assert_eq!(created.name, "alice");
         assert_eq!(created.url, "example.org");

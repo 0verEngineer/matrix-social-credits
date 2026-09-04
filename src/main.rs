@@ -1,27 +1,24 @@
-mod event_handler;
 mod data;
-mod utils;
+mod event_handler;
 #[cfg(test)]
 mod test_support;
+mod utils;
 
-use std::env;
-use std::time::Duration;
-use matrix_sdk::{
-    Client, LoopCtrl, config::SyncSettings,
-};
-use matrix_sdk::Room;
-use matrix_sdk::config::RequestConfig;
-use matrix_sdk::ruma::events::AnySyncMessageLikeEvent;
-use std::sync::{Arc, Mutex};
 use crate::data::migrations::{cleanup_events, open_and_migrate};
 use crate::event_handler::EventHandler;
 use crate::utils::autojoin::on_stripped_state_member;
 use crate::utils::matrix_util::{Retryable, authenticate, classify_error, log_retry_configuration};
 use crate::utils::session::SessionStore;
 use crate::utils::user_util::{initial_admin_user_setup, resolve_configured_user_id};
+use matrix_sdk::Room;
+use matrix_sdk::config::RequestConfig;
+use matrix_sdk::ruma::events::AnySyncMessageLikeEvent;
+use matrix_sdk::{Client, LoopCtrl, config::SyncSettings};
+use std::env;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
-
 
 // todo session preservation and emoji verification
 // todo query all room users on initial setup and create user_room_data for every user, also handle user joining
@@ -61,8 +58,8 @@ const DEFAULT_EVENT_RETENTION_DAYS: u32 = 30;
 const EVENT_CLEANUP_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 
 fn init_logging() {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(DEFAULT_LOG_FILTER));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_LOG_FILTER));
 
     tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -284,7 +281,9 @@ fn get_env_var_as_i32(var_name: &str) -> i32 {
     env::var(var_name)
         .map_err(|e| format!("Couldn't read {}: {}", var_name, e))
         .and_then(|value| {
-            value.parse::<i32>().map_err(|e| format!("Failed to parse {}: {}", var_name, e))
+            value
+                .parse::<i32>()
+                .map_err(|e| format!("Failed to parse {}: {}", var_name, e))
         })
         .unwrap_or_else(|e| panic!("Failed to parse {}: {}", var_name, e))
 }

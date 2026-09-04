@@ -1,6 +1,6 @@
+use rusqlite::{Connection, Error, Params, params};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use rusqlite::{Connection, Error, params, Params};
 use tracing::{error, warn};
 
 #[derive(Clone)]
@@ -11,11 +11,15 @@ pub struct Event {
 }
 
 pub fn create_table_event(conn: &Connection) {
-    conn.execute("CREATE TABLE IF NOT EXISTS event (
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS event (
             id TEXT PRIMARY KEY,
             event_type TEXT NOT NULL,
             handled INTEGER NOT NULL
-    )", []).expect("Failed to create event table");
+    )",
+        [],
+    )
+    .expect("Failed to create event table");
 }
 
 pub fn insert_event(conn: &Arc<Mutex<Connection>>, event: &Event) -> Result<(), Error> {
@@ -28,15 +32,15 @@ pub fn insert_event(conn: &Arc<Mutex<Connection>>, event: &Event) -> Result<(), 
 
     let connection = conn.lock().unwrap();
 
-    connection.execute(sql, params![&event.id, &event.event_type, &event.handled, seen_at])?;
+    connection.execute(
+        sql,
+        params![&event.id, &event.event_type, &event.handled, seen_at],
+    )?;
 
     Ok(())
 }
 
-pub fn find_event_in_db(
-    conn: &Arc<Mutex<Connection>>,
-    id: &String
-) -> Option<Event> {
+pub fn find_event_in_db(conn: &Arc<Mutex<Connection>>, id: &String) -> Option<Event> {
     let sql = "SELECT id, event_type, handled FROM event WHERE id=?1";
     let params = params![id];
     match do_get_event_sql(conn, sql, params) {
@@ -45,11 +49,11 @@ pub fn find_event_in_db(
                 warn!(event_id = %id, "Multiple events found for the same id");
             }
             users.pop()
-        },
+        }
         Err(e) => {
             error!(error = %e, "Database error");
             None
-        },
+        }
     }
 }
 
@@ -67,17 +71,18 @@ fn do_get_event_sql<P: Params>(
         }
     };
 
-    let events: Result<Vec<Event>, _> = stmt.query_map(params, |row| {
-        Ok(Event {
-            id: row.get(0)?,
-            event_type: row.get(1)?,
-            handled: row.get(2)?,
+    let events: Result<Vec<Event>, _> = stmt
+        .query_map(params, |row| {
+            Ok(Event {
+                id: row.get(0)?,
+                event_type: row.get(1)?,
+                handled: row.get(2)?,
+            })
         })
-    }).and_then(|mapped_rows| mapped_rows.collect());
+        .and_then(|mapped_rows| mapped_rows.collect());
 
     events
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -85,7 +90,11 @@ mod tests {
     use crate::test_support::test_db;
 
     fn event(id: &str) -> Event {
-        Event { id: id.to_owned(), event_type: "m.reaction".to_owned(), handled: true }
+        Event {
+            id: id.to_owned(),
+            event_type: "m.reaction".to_owned(),
+            handled: true,
+        }
     }
 
     #[test]
@@ -112,8 +121,11 @@ mod tests {
         insert_event(&db, &event("$e1")).unwrap();
 
         let conn = db.lock().unwrap();
-        let seen_at: i64 =
-            conn.query_row("SELECT seen_at FROM event WHERE id = '$e1'", [], |r| r.get(0)).unwrap();
+        let seen_at: i64 = conn
+            .query_row("SELECT seen_at FROM event WHERE id = '$e1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
         assert!(seen_at > 0);
     }
 }

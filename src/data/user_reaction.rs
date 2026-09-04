@@ -7,14 +7,17 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, Error, params};
 
-
 pub fn create_table_user_reaction(conn: &Connection) {
-    conn.execute("CREATE TABLE IF NOT EXISTS user_reaction (
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS user_reaction (
                 id INTEGER PRIMARY KEY,
                 user_room_data_id INTEGER NOT NULL REFERENCES user_room_data(id),
                 time INTEGER NOT NULL,
                 message_event_id TEXT NOT NULL
-        )", []).expect("Failed to create user_reaction table");
+        )",
+        [],
+    )
+    .expect("Failed to create user_reaction table");
 }
 
 /// Record a reaction at `time`.
@@ -74,7 +77,9 @@ pub fn recent_reaction_window(
 }
 
 fn to_epoch_secs(time: SystemTime) -> i64 {
-    time.duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+    time.duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 fn from_epoch_secs(secs: i64) -> SystemTime {

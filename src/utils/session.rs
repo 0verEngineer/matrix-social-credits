@@ -47,9 +47,11 @@ impl SessionStore {
             return None;
         }
 
-        match fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|contents| {
-            serde_json::from_str::<MatrixSession>(&contents).map_err(|e| e.to_string())
-        }) {
+        match fs::read_to_string(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|contents| {
+                serde_json::from_str::<MatrixSession>(&contents).map_err(|e| e.to_string())
+            }) {
             Ok(session) => {
                 info!(path = %path.display(), "Restoring the saved session");
                 Some(session)

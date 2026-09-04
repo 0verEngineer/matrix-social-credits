@@ -1,9 +1,10 @@
+use crate::data::user_reaction::{
+    has_reacted_to_message, insert_user_reaction, recent_reaction_window,
+};
+use rusqlite::{Connection, Error, Result, params};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
-use rusqlite::{Connection, Error, params, Result};
-use crate::data::user_reaction::{has_reacted_to_message, insert_user_reaction, recent_reaction_window};
 use tracing::{error, warn};
-
 
 #[derive(Clone)]
 pub struct UserRoomData {
@@ -103,7 +104,9 @@ impl UserRoomData {
             }
         };
 
-        if let Err(error) = insert_user_reaction(&connection, self.id, SystemTime::now(), message_event_id) {
+        if let Err(error) =
+            insert_user_reaction(&connection, self.id, SystemTime::now(), message_event_id)
+        {
             error!(%error, "Failed to insert user reaction");
         }
 
@@ -116,15 +119,22 @@ impl UserRoomData {
 }
 
 pub fn create_table_user_room_data(conn: &Connection) {
-    conn.execute("CREATE TABLE IF NOT EXISTS user_room_data (
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS user_room_data (
             id INTEGER PRIMARY KEY,
             user_id INTEGER NOT NULL REFERENCES user(id),
             room_id TEXT NOT NULL,
             social_credit INTEGER NOT NULL
-    )", []).expect("Failed to create user_room_data table");
+    )",
+        [],
+    )
+    .expect("Failed to create user_room_data table");
 }
 
-pub fn insert_user_room_data(conn: &Arc<Mutex<Connection>>, user_room_data: &UserRoomData) -> Result<(), Error> {
+pub fn insert_user_room_data(
+    conn: &Arc<Mutex<Connection>>,
+    user_room_data: &UserRoomData,
+) -> Result<(), Error> {
     let sql = "INSERT INTO user_room_data (user_id, room_id, social_credit) VALUES (?1, ?2, ?3)";
     let connection = conn.lock().unwrap();
 
@@ -134,7 +144,7 @@ pub fn insert_user_room_data(conn: &Arc<Mutex<Connection>>, user_room_data: &Use
             &user_room_data.user_id,
             &user_room_data.room_id,
             &user_room_data.social_credit
-        ]
+        ],
     )?;
 
     Ok(())
@@ -160,7 +170,11 @@ pub fn add_social_credit(
     connection.query_row(sql, params![delta, user_id, room_id], |row| row.get(0))
 }
 
-pub fn find_user_room_data_by_user_id_and_room_id(conn: &Arc<Mutex<Connection>>, user_id: i32, room_id: &String) -> Result<UserRoomData, Error> {
+pub fn find_user_room_data_by_user_id_and_room_id(
+    conn: &Arc<Mutex<Connection>>,
+    user_id: i32,
+    room_id: &String,
+) -> Result<UserRoomData, Error> {
     let sql = "SELECT id, user_id, room_id, social_credit FROM user_room_data WHERE user_id=?1 AND room_id=?2";
     let connection = conn.lock().unwrap();
 
@@ -174,8 +188,7 @@ pub fn find_user_room_data_by_user_id_and_room_id(conn: &Arc<Mutex<Connection>>,
             room_id: row.get(2)?,
             social_credit: row.get(3)?,
         })
-    }
-    else {
+    } else {
         Err(Error::QueryReturnedNoRows)
     }
 }
@@ -184,29 +197,45 @@ pub fn find_user_room_data_by_user_id_and_room_id(conn: &Arc<Mutex<Connection>>,
 mod tests {
     use std::time::{Duration, SystemTime};
 
-    use super::{UserRoomData, add_social_credit, find_user_room_data_by_user_id_and_room_id, insert_user_room_data};
+    use super::{
+        UserRoomData, add_social_credit, find_user_room_data_by_user_id_and_room_id,
+        insert_user_room_data,
+    };
     use crate::data::user_reaction::insert_user_reaction;
     use crate::test_support::test_db;
-    use std::sync::{Arc, Mutex};
     use rusqlite::Connection;
+    use std::sync::{Arc, Mutex};
 
     const ROOM: &str = "!room:example.org";
 
     fn seed(db: &Arc<Mutex<Connection>>) -> UserRoomData {
         {
             let conn = db.lock().unwrap();
-            conn.execute("INSERT INTO user (id, name, url, user_type) VALUES (1,'alice','example.org',0)", [])
-                .unwrap();
+            conn.execute(
+                "INSERT INTO user (id, name, url, user_type) VALUES (1,'alice','example.org',0)",
+                [],
+            )
+            .unwrap();
         }
         insert_user_room_data(
             db,
-            &UserRoomData { id: -1, user_id: 1, room_id: ROOM.to_owned(), social_credit: 250 },
+            &UserRoomData {
+                id: -1,
+                user_id: 1,
+                room_id: ROOM.to_owned(),
+                social_credit: 250,
+            },
         )
         .unwrap();
         find_user_room_data_by_user_id_and_room_id(db, 1, &ROOM.to_owned()).unwrap()
     }
 
-    fn record_reaction(db: &Arc<Mutex<Connection>>, room_data: &UserRoomData, minutes_ago: u64, message: &str) {
+    fn record_reaction(
+        db: &Arc<Mutex<Connection>>,
+        room_data: &UserRoomData,
+        minutes_ago: u64,
+        message: &str,
+    ) {
         let when = SystemTime::now() - Duration::from_secs(minutes_ago * 60);
         let conn = db.lock().unwrap();
         insert_user_reaction(&conn, room_data.id, when, message).unwrap();
@@ -232,7 +261,10 @@ mod tests {
 
         let remaining = room_data.get_time_till_user_can_react(&db, 20, 2);
 
-        assert!(remaining > 0, "the limit is reached, so there has to be a wait");
+        assert!(
+            remaining > 0,
+            "the limit is reached, so there has to be a wait"
+        );
         assert!(
             (30..=70).contains(&remaining),
             "expected roughly one minute left, got {remaining}s"
@@ -264,7 +296,10 @@ mod tests {
 
         let remaining = room_data.get_time_till_user_can_react(&db, 20, 2);
 
-        assert!((0..=20 * 60).contains(&remaining), "unexpected wait {remaining}s");
+        assert!(
+            (0..=20 * 60).contains(&remaining),
+            "unexpected wait {remaining}s"
+        );
     }
 
     #[test]
@@ -293,10 +328,17 @@ mod tests {
         let db = test_db();
         let room_data = seed(&db);
 
-        assert_eq!(add_social_credit(&db, room_data.user_id, ROOM, -25).unwrap(), 225);
-        assert_eq!(add_social_credit(&db, room_data.user_id, ROOM, 10).unwrap(), 235);
+        assert_eq!(
+            add_social_credit(&db, room_data.user_id, ROOM, -25).unwrap(),
+            225
+        );
+        assert_eq!(
+            add_social_credit(&db, room_data.user_id, ROOM, 10).unwrap(),
+            235
+        );
 
-        let reloaded = find_user_room_data_by_user_id_and_room_id(&db, 1, &ROOM.to_owned()).unwrap();
+        let reloaded =
+            find_user_room_data_by_user_id_and_room_id(&db, 1, &ROOM.to_owned()).unwrap();
         assert_eq!(reloaded.social_credit, 235);
     }
 

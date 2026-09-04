@@ -15,13 +15,13 @@ const MAX_JOIN_DELAY: Duration = Duration::from_secs(300);
 const JOIN_RETRY_BUDGET: Duration = Duration::from_secs(3600);
 
 /// Accept invitations automatically.
-pub async fn on_stripped_state_member(
-    event: StrippedRoomMemberEvent,
-    client: Client,
-    room: Room,
-) {
-    let Some(own_user_id) = client.user_id() else { return; };
-    if event.state_key != own_user_id { return; }
+pub async fn on_stripped_state_member(event: StrippedRoomMemberEvent, client: Client, room: Room) {
+    let Some(own_user_id) = client.user_id() else {
+        return;
+    };
+    if event.state_key != own_user_id {
+        return;
+    }
 
     match room.state() {
         RoomState::Joined => {
@@ -100,6 +100,9 @@ async fn join_with_retry(client: Client, room: Room, room_name: String) {
 }
 
 fn jitter() -> Duration {
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().subsec_nanos();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
     Duration::from_millis(u64::from(nanos % 1_000))
 }

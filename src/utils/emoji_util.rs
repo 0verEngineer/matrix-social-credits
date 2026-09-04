@@ -1,9 +1,9 @@
-use std::sync::{Arc, Mutex};
+use crate::data::emoji::find_all_emoji_for_room_in_db;
+use crate::data::user::HtmlAndTextAnswer;
+use crate::utils::message::escape_html;
 use matrix_sdk::Room;
 use rusqlite::Connection;
-use crate::data::emoji::find_all_emoji_for_room_in_db;
-use crate::data::user::{HtmlAndTextAnswer};
-use crate::utils::message::escape_html;
+use std::sync::{Arc, Mutex};
 
 /// Unicode variation selectors. VS16 asks for the coloured emoji presentation, VS15 for the
 /// monochrome text presentation. Clients disagree on whether to send them, so the same emoji
@@ -54,7 +54,11 @@ pub fn get_emoji_list_answer(conn: &Arc<Mutex<Connection>>, room: &Room) -> Html
     }
 
     // Sort emojis by social credit
-    emojis.sort_by(|a, b| b.social_credit.cmp(&a.social_credit).then_with(|| a.emoji.cmp(&b.emoji)));
+    emojis.sort_by(|a, b| {
+        b.social_credit
+            .cmp(&a.social_credit)
+            .then_with(|| a.emoji.cmp(&b.emoji))
+    });
 
     let text_entries: Vec<String> = emojis
         .iter()
@@ -62,7 +66,13 @@ pub fn get_emoji_list_answer(conn: &Arc<Mutex<Connection>>, room: &Room) -> Html
         .collect();
     let html_entries: Vec<String> = emojis
         .iter()
-        .map(|emoji| format!("{}: <b>{}</b>", escape_html(&emoji.emoji), emoji.social_credit))
+        .map(|emoji| {
+            format!(
+                "{}: <b>{}</b>",
+                escape_html(&emoji.emoji),
+                emoji.social_credit
+            )
+        })
         .collect();
 
     HtmlAndTextAnswer {
@@ -89,7 +99,10 @@ mod tests {
     /// the middle of a sequence survived and the entry never matched.
     #[test]
     fn strips_a_variation_selector_in_the_middle() {
-        assert_eq!(normalize_emoji("\u{2764}\u{fe0f}\u{200d}\u{1f525}"), "\u{2764}\u{200d}\u{1f525}");
+        assert_eq!(
+            normalize_emoji("\u{2764}\u{fe0f}\u{200d}\u{1f525}"),
+            "\u{2764}\u{200d}\u{1f525}"
+        );
     }
 
     #[test]

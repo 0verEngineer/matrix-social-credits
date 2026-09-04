@@ -1,5 +1,5 @@
+use rusqlite::{Connection, Error, Params, params};
 use std::sync::{Arc, Mutex};
-use rusqlite::{Connection, Error, params, Params};
 use tracing::error;
 
 #[derive(Clone)]
@@ -13,25 +13,37 @@ pub struct Emoji {
 }
 
 pub fn create_table_emoji(conn: &Connection) {
-    conn.execute("CREATE TABLE IF NOT EXISTS emoji (
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS emoji (
             id INTEGER PRIMARY KEY,
             room_id TEXT NOT NULL,
             emoji TEXT NOT NULL,
             social_credit INTEGER NOT NULL
-    )", []).expect("Failed to create emoji table");
+    )",
+        [],
+    )
+    .expect("Failed to create emoji table");
 }
 
 pub fn insert_emoji(conn: &Arc<Mutex<Connection>>, emoji: &Emoji) -> Result<(), Error> {
     let sql = "INSERT INTO emoji (room_id, emoji, social_credit) VALUES (?1, ?2, ?3)";
     let connection = conn.lock().unwrap();
 
-    connection.execute(sql, params![emoji.room_id, emoji.emoji, emoji.social_credit])?;
+    connection.execute(
+        sql,
+        params![emoji.room_id, emoji.emoji, emoji.social_credit],
+    )?;
 
     Ok(())
 }
 
-pub fn find_emoji_in_db(conn: &Arc<Mutex<Connection>>, emoji: &String, room_id: &String) -> Option<Emoji> {
-    let sql = "SELECT id, room_id, emoji, social_credit FROM emoji WHERE emoji = ?1 AND room_id = ?2";
+pub fn find_emoji_in_db(
+    conn: &Arc<Mutex<Connection>>,
+    emoji: &String,
+    room_id: &String,
+) -> Option<Emoji> {
+    let sql =
+        "SELECT id, room_id, emoji, social_credit FROM emoji WHERE emoji = ?1 AND room_id = ?2";
     let params = params![emoji, room_id];
     match do_get_emoji_sql(conn, sql, params) {
         Ok(mut emoji) => {
@@ -39,15 +51,18 @@ pub fn find_emoji_in_db(conn: &Arc<Mutex<Connection>>, emoji: &String, room_id: 
                 return Some(emoji.remove(0));
             }
             None
-        },
+        }
         Err(e) => {
             error!(error = %e, "Database error");
             None
-        },
+        }
     }
 }
 
-pub fn find_all_emoji_for_room_in_db(conn: &Arc<Mutex<Connection>>, room_id: &String) -> Option<Vec<Emoji>> {
+pub fn find_all_emoji_for_room_in_db(
+    conn: &Arc<Mutex<Connection>>,
+    room_id: &String,
+) -> Option<Vec<Emoji>> {
     let sql = "SELECT id, room_id, emoji, social_credit FROM emoji WHERE room_id = ?1";
     let params = params![room_id];
     match do_get_emoji_sql(conn, sql, params) {
@@ -55,11 +70,11 @@ pub fn find_all_emoji_for_room_in_db(conn: &Arc<Mutex<Connection>>, room_id: &St
         Err(e) => {
             error!(error = %e, "Database error");
             None
-        },
+        }
     }
 }
 
-fn do_get_emoji_sql<P:Params>(
+fn do_get_emoji_sql<P: Params>(
     conn: &Arc<Mutex<Connection>>,
     sql: &str,
     params: P,
@@ -73,19 +88,25 @@ fn do_get_emoji_sql<P:Params>(
         }
     };
 
-    let emoji: Result<Vec<Emoji>, _> = stmt.query_map(params, |row| {
-        Ok(Emoji {
-            id: row.get(0)?,
-            room_id: row.get(1)?,
-            emoji: row.get(2)?,
-            social_credit: row.get(3)?,
+    let emoji: Result<Vec<Emoji>, _> = stmt
+        .query_map(params, |row| {
+            Ok(Emoji {
+                id: row.get(0)?,
+                room_id: row.get(1)?,
+                emoji: row.get(2)?,
+                social_credit: row.get(3)?,
+            })
         })
-    }).and_then(|mapped_rows| mapped_rows.collect());
+        .and_then(|mapped_rows| mapped_rows.collect());
 
     emoji
 }
 
-pub fn delete_emoji(conn: &Arc<Mutex<Connection>>, emoji: &String, room_id: &String) -> Result<usize, Error> {
+pub fn delete_emoji(
+    conn: &Arc<Mutex<Connection>>,
+    emoji: &String,
+    room_id: &String,
+) -> Result<usize, Error> {
     let sql = "DELETE FROM emoji WHERE emoji = ?1 AND room_id = ?2";
     let connection = conn.lock().unwrap();
 
@@ -94,11 +115,18 @@ pub fn delete_emoji(conn: &Arc<Mutex<Connection>>, emoji: &String, room_id: &Str
 
 #[cfg(test)]
 mod tests {
-    use super::{Emoji, delete_emoji, find_all_emoji_for_room_in_db, find_emoji_in_db, insert_emoji};
+    use super::{
+        Emoji, delete_emoji, find_all_emoji_for_room_in_db, find_emoji_in_db, insert_emoji,
+    };
     use crate::test_support::test_db;
 
     fn emoji(room: &str, symbol: &str, credit: i32) -> Emoji {
-        Emoji { id: -1, room_id: room.to_owned(), emoji: symbol.to_owned(), social_credit: credit }
+        Emoji {
+            id: -1,
+            room_id: room.to_owned(),
+            emoji: symbol.to_owned(),
+            social_credit: credit,
+        }
     }
 
     #[test]
@@ -125,7 +153,10 @@ mod tests {
         insert_emoji(&db, &emoji("!r", "😑", -25)).unwrap();
         insert_emoji(&db, &emoji("!other", "😑", -25)).unwrap();
 
-        assert_eq!(delete_emoji(&db, &"😑".to_owned(), &"!r".to_owned()).unwrap(), 1);
+        assert_eq!(
+            delete_emoji(&db, &"😑".to_owned(), &"!r".to_owned()).unwrap(),
+            1
+        );
 
         assert!(find_emoji_in_db(&db, &"😑".to_owned(), &"!r".to_owned()).is_none());
         assert!(find_emoji_in_db(&db, &"😑".to_owned(), &"!other".to_owned()).is_some());

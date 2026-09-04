@@ -34,9 +34,7 @@ pub fn classify_error(error: &Error) -> Retryable {
         Some(ErrorKind::LimitExceeded(limit)) => {
             let retry_after = match limit.retry_after.as_ref() {
                 Some(RetryAfter::Delay(delay)) => Some(*delay),
-                Some(RetryAfter::DateTime(when)) => {
-                    when.duration_since(SystemTime::now()).ok()
-                }
+                Some(RetryAfter::DateTime(when)) => when.duration_since(SystemTime::now()).ok(),
                 None => None,
             };
             Retryable::Yes { retry_after }
@@ -78,10 +76,15 @@ pub fn classify_error(error: &Error) -> Retryable {
 /// The jitter keeps several bots (or several rooms) from hammering the homeserver in
 /// lockstep after it comes back up.
 fn backoff_for(attempt: u32) -> Duration {
-    let base = MIN_BACKOFF.saturating_mul(2u32.saturating_pow(attempt.min(6))).min(MAX_BACKOFF);
+    let base = MIN_BACKOFF
+        .saturating_mul(2u32.saturating_pow(attempt.min(6)))
+        .min(MAX_BACKOFF);
 
     // A dedicated RNG would be overkill here; the clock is random enough for jitter.
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().subsec_nanos();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
     let jitter = Duration::from_millis(u64::from(nanos % 1_000));
 
     (base + jitter).min(MAX_BACKOFF + Duration::from_secs(1))

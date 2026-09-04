@@ -1,13 +1,13 @@
-use std::sync::{Arc, Mutex};
-use rusqlite::{Connection, Error, params, Params, Statement};
 use crate::data::user_room_data::UserRoomData;
+use rusqlite::{Connection, Error, Params, Statement, params};
+use std::sync::{Arc, Mutex};
 use tracing::{error, warn};
 
 #[derive(Clone)]
 pub enum UserType {
     Default,
     Moderator,
-    Admin
+    Admin,
 }
 
 #[derive(Clone)]
@@ -16,7 +16,7 @@ pub struct User {
     pub name: String,
     pub url: String,
     pub user_type: UserType,
-    pub room_data: Option<UserRoomData>
+    pub room_data: Option<UserRoomData>,
 }
 
 pub struct HtmlAndTextAnswer {
@@ -25,12 +25,16 @@ pub struct HtmlAndTextAnswer {
 }
 
 pub fn create_table_user(conn: &Connection) {
-    conn.execute("CREATE TABLE IF NOT EXISTS user (
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS user (
             id INTEGER PRIMARY KEY,
             name TEXT NOT NULL,
             url TEXT NOT NULL,
             user_type INTEGER NOT NULL
-    )", []).expect("Failed to create user table");
+    )",
+        [],
+    )
+    .expect("Failed to create user table");
 }
 
 pub fn insert_user(conn: &Arc<Mutex<Connection>>, user: &User) -> Result<(), Error> {
@@ -61,10 +65,7 @@ fn get_user_type_as_int(user: &User) -> i32 {
     }
 }
 
-pub fn find_user_in_db(
-    conn: &Arc<Mutex<Connection>>,
-    name: &String, url: &String
-) -> Option<User> {
+pub fn find_user_in_db(conn: &Arc<Mutex<Connection>>, name: &String, url: &String) -> Option<User> {
     let sql = "SELECT id, name, url, user_type FROM user WHERE name=?1 AND url=?2";
     let params = params![name, url];
     match do_get_user_sql(conn, sql, params) {
@@ -73,11 +74,11 @@ pub fn find_user_in_db(
                 warn!(%name, %url, "Multiple users found for the same name and url");
             }
             users.pop()
-        },
+        }
         Err(e) => {
             error!(error = %e, "Database error");
             None
-        },
+        }
     }
 }
 
@@ -134,35 +135,44 @@ fn do_get_user_sql<P: Params>(
     do_get_user_sql_inner(params, &mut stmt, false)
 }
 
-fn do_get_user_sql_inner<P: Params>(params: P, stmt: &mut Statement, with_room_data: bool) -> Result<Vec<User>, Error> {
-    let users: Result<Vec<User>, _> = stmt.query_map(params, |row| {
-        Ok(User {
-            id: row.get(0)?,
-            name: row.get(1)?,
-            url: row.get(2)?,
-            user_type: match row.get::<_, i32>(3)? {
-                0 => UserType::Default,
-                1 => UserType::Moderator,
-                2 => UserType::Admin,
-                _ => UserType::Default,
-            },
-            room_data: match with_room_data {
-                true => Some(UserRoomData {
-                    id: row.get(4)?,
-                    user_id: row.get(5)?,
-                    room_id: row.get(6)?,
-                    social_credit: row.get(7)?,
-                }),
-                false => None,
-            },
+fn do_get_user_sql_inner<P: Params>(
+    params: P,
+    stmt: &mut Statement,
+    with_room_data: bool,
+) -> Result<Vec<User>, Error> {
+    let users: Result<Vec<User>, _> = stmt
+        .query_map(params, |row| {
+            Ok(User {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                url: row.get(2)?,
+                user_type: match row.get::<_, i32>(3)? {
+                    0 => UserType::Default,
+                    1 => UserType::Moderator,
+                    2 => UserType::Admin,
+                    _ => UserType::Default,
+                },
+                room_data: match with_room_data {
+                    true => Some(UserRoomData {
+                        id: row.get(4)?,
+                        user_id: row.get(5)?,
+                        room_id: row.get(6)?,
+                        social_credit: row.get(7)?,
+                    }),
+                    false => None,
+                },
+            })
         })
-    }).and_then(|mapped_rows| mapped_rows.collect());
+        .and_then(|mapped_rows| mapped_rows.collect());
     users
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{User, UserType, find_all_users_with_room_data_in_db, find_user_in_db, insert_user, update_user};
+    use super::{
+        User, UserType, find_all_users_with_room_data_in_db, find_user_in_db, insert_user,
+        update_user,
+    };
     use crate::data::user_room_data::{UserRoomData, insert_user_room_data};
     use crate::test_support::test_db;
 
@@ -193,12 +203,14 @@ mod tests {
     fn promotes_a_user_to_admin() {
         let db = test_db();
         insert_user(&db, &user("alice")).unwrap();
-        let mut found = find_user_in_db(&db, &"alice".to_owned(), &"example.org".to_owned()).unwrap();
+        let mut found =
+            find_user_in_db(&db, &"alice".to_owned(), &"example.org".to_owned()).unwrap();
 
         found.user_type = UserType::Admin;
         update_user(&db, &found).unwrap();
 
-        let reloaded = find_user_in_db(&db, &"alice".to_owned(), &"example.org".to_owned()).unwrap();
+        let reloaded =
+            find_user_in_db(&db, &"alice".to_owned(), &"example.org".to_owned()).unwrap();
         assert!(matches!(reloaded.user_type, UserType::Admin));
     }
 
@@ -212,14 +224,23 @@ mod tests {
             let stored = find_user_in_db(&db, &name.to_owned(), &"example.org".to_owned()).unwrap();
             insert_user_room_data(
                 &db,
-                &UserRoomData { id: -1, user_id: stored.id, room_id: ROOM.to_owned(), social_credit: 250 },
+                &UserRoomData {
+                    id: -1,
+                    user_id: stored.id,
+                    room_id: ROOM.to_owned(),
+                    social_credit: 250,
+                },
             )
             .unwrap();
         }
 
-        let listed =
-            find_all_users_with_room_data_in_db(&db, &ROOM.to_owned(), "some-other-bot-name", "example.org")
-                .unwrap();
+        let listed = find_all_users_with_room_data_in_db(
+            &db,
+            &ROOM.to_owned(),
+            "some-other-bot-name",
+            "example.org",
+        )
+        .unwrap();
 
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].name, "alice");
@@ -232,13 +253,22 @@ mod tests {
         let stored = find_user_in_db(&db, &"alice".to_owned(), &"example.org".to_owned()).unwrap();
         insert_user_room_data(
             &db,
-            &UserRoomData { id: -1, user_id: stored.id, room_id: ROOM.to_owned(), social_credit: 250 },
+            &UserRoomData {
+                id: -1,
+                user_id: stored.id,
+                room_id: ROOM.to_owned(),
+                social_credit: 250,
+            },
         )
         .unwrap();
 
-        let listed =
-            find_all_users_with_room_data_in_db(&db, &"!other:example.org".to_owned(), "bot", "example.org")
-                .unwrap();
+        let listed = find_all_users_with_room_data_in_db(
+            &db,
+            &"!other:example.org".to_owned(),
+            "bot",
+            "example.org",
+        )
+        .unwrap();
 
         assert!(listed.is_empty());
     }
