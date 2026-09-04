@@ -1685,7 +1685,7 @@ dependencies = [
 
 [[package]]
 name = "matrix-social-credits"
-version = "0.0.9-alpha"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "matrix-sdk",

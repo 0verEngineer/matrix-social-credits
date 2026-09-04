@@ -1,8 +1,9 @@
 [package]
 name = "matrix-social-credits"
-version = "0.0.9-alpha"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.93"
+license = "GPL-3.0-only"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
