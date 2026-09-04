@@ -235,8 +235,22 @@ Two consequences worth knowing:
   [Limitations](#limitations) if members of your room restrict encryption to verified
   sessions.
 
-Reactions are not encrypted in Matrix, so scoring keeps working in an encrypted room even for
-messages the bot cannot read.
+#### Reactions are a special case
+
+Clients send reactions unencrypted even in an encrypted room. That is not a rule in the spec,
+it is what the two SDKs that matter actually do: matrix-js-sdk, which Element uses, returns
+early for `m.reaction` in `shouldEncryptEventForRoom`, and the Rust SDK skips it in its send
+path. The reasoning in both is the same -- the relation data travels in the clear anyway, so
+encrypting the wrapper hides nothing while breaking server-side bundling and triggering
+notifications.
+
+For this bot that means scoring keeps working even for a message it cannot read: it needs the
+sender of the annotated message, and the sender of an encrypted event is readable without any
+key.
+
+Do not lean on it too hard, though. Both SDKs note the intention to encrypt the reaction key
+itself at some point. If that ever ships, the bot will need the room key to see which emoji
+was used, and reactions to unreadable messages stop counting.
 
 ### Rate limits and restarts
 Synapse answers with `429 M_LIMIT_EXCEEDED` fairly often, especially while the Matrix stack is
@@ -282,7 +296,8 @@ The bot handles `SIGTERM` and `Ctrl-C`, so `docker stop` shuts it down cleanly.
 - **The bot's device is never verified.** It works in encrypted rooms, but it shows up as an
   unverified session. Anybody who has "never send encrypted messages to unverified sessions"
   switched on will not share room keys with it, so the bot cannot read *their* messages. Their
-  reactions still count -- reactions are not encrypted in Matrix.
+  reactions still count, because clients send those unencrypted -- see
+  [Encrypted rooms](#encrypted-rooms).
 - **Only messages sent after the bot's device existed can be read.** The bot cannot decrypt
   anything from before it joined, and deleting `STORE_PATH` throws its identity away and
   starts a new device.

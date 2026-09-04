@@ -9,7 +9,7 @@ use crate::utils::user_util::{compare_user, get_user_list_answer, setup_user};
 use matrix_sdk::ruma::events;
 use matrix_sdk::ruma::events::room::message::{MessageType, Relation};
 use matrix_sdk::ruma::events::{AnySyncMessageLikeEvent, AnySyncTimelineEvent};
-use matrix_sdk::ruma::{OwnedUserId, UserId};
+use matrix_sdk::ruma::{EventId, OwnedUserId, UserId};
 use matrix_sdk::{Room, RoomState};
 use rusqlite::Connection;
 use std::sync::{Arc, Mutex};
@@ -117,12 +117,15 @@ impl EventHandler {
                         return;
                     }
                 };
-                if let AnySyncTimelineEvent::MessageLike(message_like_event) = deserialized_event {
-                    trace!(?message_like_event, "Annotated message like event");
-                    trace!(sender = %message_like_event.sender(), "Recipient of the reaction");
+                trace!(?deserialized_event, "Annotated event");
 
-                    // The sender here is the user where the social credit score should be changed, so it is the recipient of the reaction
-                    let recipient_user_id = message_like_event.sender();
+                // The author of the annotated event is the user whose score changes, so the
+                // recipient of the reaction.
+                if let Some((recipient_user_id, annotated_message_id)) =
+                    annotated_event_author(&deserialized_event)
+                {
+                    trace!(sender = %recipient_user_id, "Recipient of the reaction");
+
                     if self.is_user_the_bot(recipient_user_id) {
                         debug!("Recipient of reaction is the bot itself");
                         return;
@@ -140,7 +143,7 @@ impl EventHandler {
                         return;
                     };
 
-                    let annotated_message_id = message_like_event.event_id().to_string();
+                    let annotated_message_id = annotated_message_id.to_string();
 
                     if sender_user_room_data.has_user_already_reacted_to_message_event_id(
                         &self.conn,
@@ -480,6 +483,21 @@ impl EventHandler {
     }
 }
 
+/// The author of the event a reaction points at, together with that event's id.
+///
+/// The annotated event is frequently one the bot cannot read: in an encrypted room it arrives
+/// as `m.room.encrypted` whenever the bot has no key for it, and matrix-sdk hands the still
+/// encrypted event back rather than failing. That is fine here -- sender and event id of an
+/// encrypted event are in the clear, and those two are all that scoring needs. It is why a
+/// reaction still counts for a message the bot could not decrypt.
+fn annotated_event_author(event: &AnySyncTimelineEvent) -> Option<(&UserId, &EventId)> {
+    match event {
+        AnySyncTimelineEvent::MessageLike(event) => Some((event.sender(), event.event_id())),
+        // A reaction to a state event; there is nobody to score for it.
+        AnySyncTimelineEvent::State(_) => None,
+    }
+}
+
 /// Split a message body into the command word and everything after it.
 fn split_command(body: &str) -> (&str, &str) {
     let body = body.trim();
@@ -489,7 +507,68 @@ fn split_command(body: &str) -> (&str, &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::split_command;
+    use matrix_sdk::ruma::events::AnySyncTimelineEvent;
+    use matrix_sdk::ruma::serde::Raw;
+
+    use super::{annotated_event_author, split_command};
+
+    /// A reaction points at a message. In an encrypted room the bot often cannot read that
+    /// message -- it was sent before the bot's device existed, or its author does not share
+    /// keys with unverified sessions. matrix-sdk then hands back the undecrypted
+    /// `m.room.encrypted` event instead of failing, and scoring has to keep working, because
+    /// clients send reactions themselves in the clear.
+    ///
+    /// This pins the property the reaction handler depends on: sender and event id of an
+    /// encrypted event are readable without any key.
+    #[test]
+    fn the_author_of_an_undecryptable_event_is_still_readable() {
+        let raw = Raw::<AnySyncTimelineEvent>::from_json_string(
+            r#"{
+                "type": "m.room.encrypted",
+                "sender": "@alice:example.org",
+                "event_id": "$secret",
+                "origin_server_ts": 1700000000000,
+                "content": {
+                    "algorithm": "m.megolm.v1.aes-sha2",
+                    "ciphertext": "AwgAEnB+not+real+ciphertext",
+                    "sender_key": "somesenderkey",
+                    "device_id": "SOMEDEVICE",
+                    "session_id": "somesession"
+                }
+            }"#
+            .to_owned(),
+        )
+        .unwrap();
+
+        let event = raw
+            .deserialize()
+            .expect("an encrypted event still deserializes");
+        let (sender, event_id) =
+            annotated_event_author(&event).expect("an encrypted event has an author");
+
+        assert_eq!(sender.as_str(), "@alice:example.org");
+        assert_eq!(event_id.as_str(), "$secret");
+    }
+
+    #[test]
+    fn a_state_event_has_nobody_to_score() {
+        let raw = Raw::<AnySyncTimelineEvent>::from_json_string(
+            r#"{
+                "type": "m.room.topic",
+                "state_key": "",
+                "sender": "@alice:example.org",
+                "event_id": "$topic",
+                "origin_server_ts": 1700000000000,
+                "content": { "topic": "hello" }
+            }"#
+            .to_owned(),
+        )
+        .unwrap();
+
+        let event = raw.deserialize().unwrap();
+
+        assert!(annotated_event_author(&event).is_none());
+    }
 
     #[test]
     fn splits_a_command_without_arguments() {
