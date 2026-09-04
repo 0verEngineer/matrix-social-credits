@@ -1,5 +1,5 @@
 use std::sync::{Arc, Mutex};
-use matrix_sdk::room::{Joined};
+use matrix_sdk::Room;
 use regex::Regex;
 use rusqlite::Connection;
 use crate::data::user::{find_all_users_with_room_data_in_db, find_user_in_db, insert_user, update_user, User, HtmlAndTextAnswer, UserType};
@@ -20,7 +20,7 @@ pub fn extract_userdata_from_string(body: &str) -> Option<(String, String)> {
     None
 }
 
-pub fn setup_user(conn: &Arc<Mutex<Connection>>, room: Option<Joined>, user_tag: &String, user_type: UserType, initial_social_credit: i32) -> Option<User> {
+pub fn setup_user(conn: &Arc<Mutex<Connection>>, room: Option<Room>, user_tag: &String, user_type: UserType, initial_social_credit: i32) -> Option<User> {
     if let Some((username, domain)) = extract_userdata_from_string(user_tag) {
         let user_opt = find_user_in_db(conn, &username, &domain);
         let mut mut_user_opt = user_opt.clone().take();
@@ -53,7 +53,7 @@ pub fn setup_user(conn: &Arc<Mutex<Connection>>, room: Option<Joined>, user_tag:
     None
 }
 
-fn setup_user_room_data_for_room(conn: &Arc<Mutex<Connection>>, room: Option<Joined>, user: &mut User, initial_social_credit: i32) {
+fn setup_user_room_data_for_room(conn: &Arc<Mutex<Connection>>, room: Option<Room>, user: &mut User, initial_social_credit: i32) {
     if room.is_some() {
         let room = room.unwrap();
         let room_data = find_user_room_data_by_user_id_and_room_id(conn, user.id, &room.room_id().to_string());
@@ -96,7 +96,7 @@ pub fn initial_admin_user_setup(conn: &Arc<Mutex<Connection>>, username: &String
     }
 }
 
-pub fn get_user_list_answer(conn: &Arc<Mutex<Connection>>, room: &Joined) -> HtmlAndTextAnswer {
+pub fn get_user_list_answer(conn: &Arc<Mutex<Connection>>, room: &Room) -> HtmlAndTextAnswer {
     let users_opt = find_all_users_with_room_data_in_db(&conn, &room.room_id().to_string());
     let empty_answer = HtmlAndTextAnswer {
         html: String::from("No scores"),

@@ -27,7 +27,8 @@ impl UserReaction {
             println!("{}", msg);
             return Err(msg.to_string());
         }
-        let epoch_secs = duration_since_epoch_opt.unwrap().as_secs();
+        // rusqlite 0.40 no longer implements ToSql for u64, SQLite integers are i64 anyway.
+        let epoch_secs = duration_since_epoch_opt.unwrap().as_secs() as i64;
 
         conn.execute(
             sql,

@@ -1,10 +1,10 @@
 use std::sync::{Arc, Mutex};
-use matrix_sdk::room::Joined;
+use matrix_sdk::Room;
 use rusqlite::Connection;
 use crate::data::emoji::find_all_emoji_for_room_in_db;
 use crate::data::user::{HtmlAndTextAnswer};
 
-pub fn get_emoji_list_answer(conn: &Arc<Mutex<Connection>>, room: &Joined) -> HtmlAndTextAnswer {
+pub fn get_emoji_list_answer(conn: &Arc<Mutex<Connection>>, room: &Room) -> HtmlAndTextAnswer {
     let emojis_opt = find_all_emoji_for_room_in_db(conn, &room.room_id().to_string());
     let empty_answer = HtmlAndTextAnswer {
         html: String::from("No emojis, use the !help command to see how to add emojis"),

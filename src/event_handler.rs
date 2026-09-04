@@ -1,8 +1,7 @@
 use std::sync::{Arc, Mutex};
-use matrix_sdk::room::{Joined, Room};
+use matrix_sdk::{Room, RoomState};
 use matrix_sdk::ruma::{events};
-use matrix_sdk::ruma::events::{AnySyncMessageLikeEvent, AnyTimelineEvent};
-use matrix_sdk::ruma::events::room::encrypted::Relation;
+use matrix_sdk::ruma::events::{AnySyncMessageLikeEvent, AnySyncTimelineEvent};
 use matrix_sdk::ruma::events::room::message::{MessageType, RoomMessageEventContent};
 use rusqlite::Connection;
 use crate::data::emoji::{Emoji, find_emoji_in_db, insert_emoji};
@@ -37,191 +36,166 @@ impl EventHandler {
     }
 
     pub async fn on_message_like_event(&self, event: AnySyncMessageLikeEvent, room: Room) {
-        match room {
-            Room::Joined(room) => {
-                //println!("Received a AnySyncMessageLikeEvent, type: {:?}, event {:?}", event.event_type().to_string(), event); // debug level
+        // matrix-sdk 0.7 replaced the Room::Joined / Room::Invited / Room::Left enum with a
+        // single Room type that carries its membership state.
+        if room.state() != RoomState::Joined {
+            return;
+        }
 
-                if self.check_and_handle_event_already_handled(&event) { return; }
-                if self.handle_sender_is_the_bot(&event) { return; }
+        if self.check_and_handle_event_already_handled(&event) { return; }
+        if self.handle_sender_is_the_bot(&event) { return; }
 
-                let sender = setup_user(&self.conn, Some(room.clone()), &event.sender().to_string(), UserType::Default, self.initial_social_credit);
-                if sender.is_none() {
-                    println!("Sender is none"); // debug level
+        let sender = setup_user(&self.conn, Some(room.clone()), &event.sender().to_string(), UserType::Default, self.initial_social_credit);
+        if sender.is_none() {
+            println!("Sender is none"); // debug level
+            return;
+        }
+
+        // Matrix does not support stickers in tagged messages so we cannot use stickers at the moment
+
+        if event.event_type().to_string() == "m.reaction" {
+            let sender = sender.clone().unwrap();
+            if event.original_content().is_none() {
+                println!("Received a m.reaction event without original_content. Event: {:?}", event); // debug level
+                return;
+            }
+
+            if let events::AnyMessageLikeEventContent::Reaction(content) = event.original_content().unwrap() {
+                println!("Reaction content {:?}", content);
+                let mut emoji_text = content.relates_to.key.clone();
+                if emoji_text.ends_with("\u{fe0f}") {
+                    emoji_text = emoji_text.replace("\u{fe0f}", "");
+                }
+
+                let emoji = find_emoji_in_db(&self.conn, &emoji_text, &room.room_id().to_string());
+                if emoji.is_none() {
+                    println!("Emoji {} is not registered", content.relates_to.key); // debug level
+                    return;
+                }
+                let emoji = emoji.unwrap();
+
+                if sender.room_data.is_none() {
+                    println!("Sender of reaction does not have room data"); // error level
                     return;
                 }
 
-                // Matrix does not support stickers in tagged messages so we cannot use stickers at the moment
-                /*if event.event_type().to_string() == "m.sticker" {
-                    println!("Received a sticker event {:?}", event);
-                    match event.original_content().unwrap() {
-                        events::AnyMessageLikeEventContent::Sticker(StickerEventContent { body, info, url, ..}) => {}
-                        _ => {}
-                    }
-                }*/
+                let sender_user_room_data = sender.clone().room_data.unwrap();
+                let time_till_user_can_react = sender_user_room_data.get_time_till_user_can_react(self.reaction_period_minutes, self.reaction_limit);
+                if time_till_user_can_react > 0 {
+                    let minutes = time_till_user_can_react / 60;
+                    let seconds = time_till_user_can_react % 60;
+                    let text = format!("{}, you are still on cooldown, remaining time: {}m {}s", sender.name, minutes, seconds);
+                    room.send(RoomMessageEventContent::text_html(
+                        text.clone(),
+                        text
+                    )).await.unwrap();
+                    return;
+                }
 
-                if event.event_type().to_string() == "m.reaction" {
-                    let sender = sender.clone().unwrap();
-                    if event.original_content().is_none() {
-                        println!("Received a m.reaction event without original_content. Event: {:?}", event); // debug level
+                // The reaction points at the message it annotates. In ruma 0.16 the annotation is
+                // reachable directly via `relates_to`, the Relation enum detour is gone.
+                let annotated_event_id = content.relates_to.event_id.clone();
+                let message_event = room.event(&annotated_event_id, None).await;
+                if message_event.is_err() {
+                    println!("Unable to get the message event that relates to this reaction event"); // error level
+                    return;
+                }
+
+                let message_event = message_event.unwrap();
+                let deserialized_event = match message_event.raw().deserialize() {
+                    Ok(event) => event,
+                    Err(e) => {
+                        println!("Unable to deserialize message event: {}", e); // error level
+                        return;
+                    }
+                };
+                if let AnySyncTimelineEvent::MessageLike(message_like_event) = deserialized_event {
+                    println!("Message like event {:?}", message_like_event);
+                    println!("Sender: {}", message_like_event.sender());
+
+                    // The sender here is the user where the social credit score should be changed, so it is the recipient of the reaction
+                    let recipient_user_tag = message_like_event.sender().to_string();
+                    let recipient_opt = setup_user(&self.conn, Some(room.clone()), &recipient_user_tag, UserType::Default, self.initial_social_credit);
+                    if recipient_opt.is_none() {
+                        println!("Recipient of reaction is none");
+                        return;
+                    }
+                    let mut recipient = recipient_opt.clone().unwrap();
+
+                    if self.is_user_the_bot(&recipient.name, &recipient.url) {
+                        println!("Recipient of reaction is the bot itself"); // debug level
                         return;
                     }
 
-                    match event.original_content().unwrap() {
-                        events::AnyMessageLikeEventContent::Reaction(content) => {
-                            println!("Reaction content {:?}", content);
-                            let mut emoji_text = content.relates_to.key.clone();
-                            if emoji_text.ends_with("\u{fe0f}") {
-                                emoji_text = emoji_text.replace("\u{fe0f}", "");
-                            }
-
-                            let emoji = find_emoji_in_db(&self.conn, &emoji_text, &room.room_id().to_string());
-                            if emoji.is_none() {
-                                println!("Emoji {} is not registered", content.relates_to.key); // debug level
-                                return;
-                            }
-                            let emoji = emoji.unwrap();
-
-                            let relation = &event.original_content().unwrap().relation();
-                            if relation.is_none() {
-                                println!("Relation is none");
-                                return;
-                            }
-
-                            if sender.room_data.is_none() {
-                                println!("Sender of reaction does not have room data"); // error level
-                                return;
-                            }
-
-                            let sender_user_room_data = sender.clone().room_data.unwrap();
-                            let time_till_user_can_react = sender_user_room_data.get_time_till_user_can_react(self.reaction_period_minutes, self.reaction_limit);
-                            if time_till_user_can_react > 0 {
-                                let minutes = time_till_user_can_react / 60;
-                                let seconds = time_till_user_can_react % 60;
-                                let text = format!("{}, you are still on cooldown, remaining time: {}m {}s", sender.name, minutes, seconds);
-                                room.send(RoomMessageEventContent::text_html(
-                                    text.clone(),
-                                    text
-                                ), None).await.unwrap();
-                                return;
-                            }
-
-                            match relation.clone().unwrap().clone() {
-                                Relation::Annotation(annotation) => {
-                                    let message_event = room.event(&*annotation.event_id).await;
-                                    if message_event.is_err() {
-                                        println!("Unable to get the message event that relates to this reaction event"); // error level
-                                        return;
-                                    }
-
-                                    let message_event = message_event.unwrap().event;
-                                    let deserialized_event = match message_event.deserialize() {
-                                        Ok(event) => event,
-                                        Err(e) => {
-                                            println!("Unable to deserialize message event: {}", e); // error level
-                                            return;
-                                        }
-                                    };
-                                    match deserialized_event {
-                                        AnyTimelineEvent::MessageLike(message_like_event) => {
-                                            println!("Message like event {:?}", message_like_event);
-                                            println!("Sender: {}", message_like_event.sender().to_string());
-
-                                            // The sender here is the user where the social credit score should be changed, so it is the recipient of the reaction
-                                            let recipient_user_tag = message_like_event.sender().to_string();
-                                            let recipient_opt = setup_user(&self.conn, Some(room.clone()), &recipient_user_tag, UserType::Default, self.initial_social_credit);
-                                            if recipient_opt.is_none() {
-                                                println!("Recipient of reaction is none");
-                                                return;
-                                            }
-                                            let mut recipient = recipient_opt.clone().unwrap();
-
-                                            if self.is_user_the_bot(&recipient.name, &recipient.url) {
-                                                println!("Recipient of reaction is the bot itself"); // debug level
-                                                return;
-                                            }
-
-                                            if sender_user_room_data.has_user_already_reacted_to_message_event_id(&message_like_event.event_id().to_string()) {
-                                                println!("Sender @{}:{} already reacted to this message event: {}", sender.name, sender.url, event.event_id()); // debug level
-                                                return;
-                                            }
-
-                                            let sender_clone = sender.clone();
-
-                                            if compare_user(&recipient, &sender_clone) {
-                                                println!("Sender and recipient of reaction are the same user"); // debug level
-                                                return;
-                                            }
-
-                                            if recipient.room_data.is_none() {
-                                                println!("Recipient of reaction does not have room data"); // error level
-                                                return;
-                                            }
-
-                                            let mut recipient_room_data = recipient.room_data.unwrap();
-                                            let old_social_credit = recipient_room_data.social_credit;
-                                            recipient_room_data.social_credit += emoji.social_credit;
-                                            recipient.room_data = Some(recipient_room_data);
-
-                                            // Update sender reactions
-                                            self.update_user_in_db(&recipient);
-                                            sender.room_data.unwrap().add_reaction(&self.conn, self.reaction_period_minutes, &message_like_event.event_id().to_string());
-
-                                            let text = format!("<b>{}</b> changed <b>{}'s</b> Social Credit Score using {} from <b>{}</b> to <b>{}</b>", sender.name, recipient.name, emoji.emoji, old_social_credit, recipient.room_data.unwrap().social_credit);
-                                            room.send(RoomMessageEventContent::text_html(
-                                                text.clone(),
-                                                text
-                                            ), None).await.unwrap();
-                                        },
-                                        _ => {}
-                                    }
-                                },
-                                _ => {}
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-
-                if event.event_type().to_string() == "m.room.message" {
-                    if event.original_content().is_none() {
-                        println!("Received a m.room.message event without original_content. Event: {:?}", event); // debug level
+                    if sender_user_room_data.has_user_already_reacted_to_message_event_id(&message_like_event.event_id().to_string()) {
+                        println!("Sender @{}:{} already reacted to this message event: {}", sender.name, sender.url, event.event_id()); // debug level
                         return;
                     }
 
-                    let mut sender = sender.unwrap();
+                    let sender_clone = sender.clone();
 
-                    match event.original_content().unwrap() {
-                        events::AnyMessageLikeEventContent::RoomMessage(content) => {
-                            match content.msgtype {
-                                MessageType::Text(..) => {},
-                                _ => { return; }
-                            }
-
-                            let body = content.body();
-
-                            // commands
-                            let mut stripped_body: String = body.to_string();
-                            if body.starts_with("* ") {
-                                stripped_body = body.strip_prefix("* ").unwrap().to_string();
-                            }
-
-                            if self.handle_help(&room, &mut stripped_body).await { return; };
-                            if self.handle_list(&room, &mut stripped_body).await { return; };
-                            if self.handle_list_emojis(&room, &mut stripped_body).await { return; };
-                            if self.handle_register_emoji(room, &mut sender, &mut stripped_body).await { return; }
-                        }
-                        _ => {}
+                    if compare_user(&recipient, &sender_clone) {
+                        println!("Sender and recipient of reaction are the same user"); // debug level
+                        return;
                     }
+
+                    if recipient.room_data.is_none() {
+                        println!("Recipient of reaction does not have room data"); // error level
+                        return;
+                    }
+
+                    let mut recipient_room_data = recipient.room_data.unwrap();
+                    let old_social_credit = recipient_room_data.social_credit;
+                    recipient_room_data.social_credit += emoji.social_credit;
+                    recipient.room_data = Some(recipient_room_data);
+
+                    // Update sender reactions
+                    self.update_user_in_db(&recipient);
+                    sender.room_data.unwrap().add_reaction(&self.conn, self.reaction_period_minutes, &message_like_event.event_id().to_string());
+
+                    let text = format!("<b>{}</b> changed <b>{}'s</b> Social Credit Score using {} from <b>{}</b> to <b>{}</b>", sender.name, recipient.name, emoji.emoji, old_social_credit, recipient.room_data.unwrap().social_credit);
+                    room.send(RoomMessageEventContent::text_html(
+                        text.clone(),
+                        text
+                    )).await.unwrap();
                 }
-            },
-            _ => { return }
+            }
+        }
+
+        if event.event_type().to_string() == "m.room.message" {
+            if event.original_content().is_none() {
+                println!("Received a m.room.message event without original_content. Event: {:?}", event); // debug level
+                return;
+            }
+
+            let mut sender = sender.unwrap();
+
+            if let events::AnyMessageLikeEventContent::RoomMessage(content) = event.original_content().unwrap() {
+                match content.msgtype {
+                    MessageType::Text(..) => {},
+                    _ => { return; }
+                }
+
+                let body = content.body();
+
+                // commands
+                let mut stripped_body: String = body.to_string();
+                if body.starts_with("* ") {
+                    stripped_body = body.strip_prefix("* ").unwrap().to_string();
+                }
+
+                if self.handle_help(&room, &mut stripped_body).await { return; };
+                if self.handle_list(&room, &mut stripped_body).await { return; };
+                if self.handle_list_emojis(&room, &mut stripped_body).await { return; };
+                if self.handle_register_emoji(room, &mut sender, &mut stripped_body).await { return; }
+            }
         }
     }
 
     fn check_and_handle_event_already_handled(&self, event: &AnySyncMessageLikeEvent) -> bool {
         let handled_event = find_event_in_db(&self.conn, &event.event_id().to_string());
-        if handled_event.is_some() {
-            println!("Event {} already handled", handled_event.unwrap().id); // debug level
+        if let Some(handled_event) = handled_event {
+            println!("Event {} already handled", handled_event.id); // debug level
             return true;
         }
 
@@ -238,38 +212,37 @@ impl EventHandler {
     }
 
     fn handle_sender_is_the_bot(&self, event: &AnySyncMessageLikeEvent) -> bool {
-        let sender_userdata = extract_userdata_from_string(event.sender().to_string().as_str());
-        if sender_userdata.is_some() {
-            let sender_userdata = sender_userdata.unwrap();
-            if self.is_user_the_bot(&*sender_userdata.0, &*sender_userdata.1) {
-                println!("Received a message from the bot itself, event: {:?}", event); // debug level
-                return true;
-            }
+        let sender_userdata = extract_userdata_from_string(event.sender().as_str());
+        if let Some(sender_userdata) = sender_userdata
+            && self.is_user_the_bot(&sender_userdata.0, &sender_userdata.1)
+        {
+            println!("Received a message from the bot itself, event: {:?}", event); // debug level
+            return true;
         }
         false
     }
 
-    async fn handle_list(&self, room: &Joined, stripped_body: &mut String) -> bool {
+    async fn handle_list(&self, room: &Room, stripped_body: &mut String) -> bool {
         if stripped_body == "!list" {
-            let answer = get_user_list_answer(&self.conn, &room);
+            let answer = get_user_list_answer(&self.conn, room);
             let content = RoomMessageEventContent::text_html(answer.text, answer.html);
-            room.send(content, None).await.unwrap();
+            room.send(content).await.unwrap();
             true;
         }
         false
     }
 
-    async fn handle_list_emojis(&self, room: &Joined, stripped_body: &mut String) -> bool {
+    async fn handle_list_emojis(&self, room: &Room, stripped_body: &mut String) -> bool {
         if stripped_body == "!list_emoji" || stripped_body == "!list-emoji" || stripped_body == "!list_emojis" || stripped_body == "!list-emojis" {
-            let answer = get_emoji_list_answer(&self.conn, &room);
+            let answer = get_emoji_list_answer(&self.conn, room);
             let content = RoomMessageEventContent::text_html(answer.text, answer.html);
-            room.send(content, None).await.unwrap();
+            room.send(content).await.unwrap();
             true;
         }
         false
     }
 
-    async fn handle_help(&self, room: &Joined, stripped_body: &mut String) -> bool {
+    async fn handle_help(&self, room: &Room, stripped_body: &mut String) -> bool {
         if stripped_body == "!help" {
             let help_body = "<h3>Commands:</h3><br>
                 - <b>!list</b>: List all users and their social credit score for the current room<br><br>
@@ -277,18 +250,18 @@ impl EventHandler {
                 - <b>!register_emoji</b> <emoji> <social_credit>: Register an emoji with a social credit score for the current room. Example: !register_emoji 😑 -25
             ".to_string();
             let content = RoomMessageEventContent::text_html(help_body.clone(), help_body);
-            room.send(content, None).await.unwrap();
+            room.send(content).await.unwrap();
             true;
         }
         false
     }
 
-    async fn handle_register_emoji(&self, room: Joined, sender: &mut User, body: &mut String) -> bool {
+    async fn handle_register_emoji(&self, room: Room, sender: &mut User, body: &mut String) -> bool {
         if body.starts_with("!register_emoji") || body.starts_with("!register-emoji") {
             match sender.clone().user_type {
                 UserType::Admin => {},
                 _ => {
-                    room.send(RoomMessageEventContent::text_plain("You are not allowed to use this command"), None).await.unwrap();
+                    room.send(RoomMessageEventContent::text_plain("You are not allowed to use this command")).await.unwrap();
                     return true;
                 }
             }
@@ -298,24 +271,24 @@ impl EventHandler {
             if text_opt.is_none() {
                 text_opt = body.strip_prefix("!register-emoji");
                 if text_opt.is_none() {
-                    room.send(RoomMessageEventContent::text_plain(error_message), None).await.unwrap();
+                    room.send(RoomMessageEventContent::text_plain(error_message)).await.unwrap();
                     return true;
                 }
             }
             let mut parts = text_opt.unwrap().split(" ").collect::<Vec<&str>>();
-            if parts.len() == 3 && parts[0] == "" {
+            if parts.len() == 3 && parts[0].is_empty() {
                 parts.remove(0);
             }
 
             if parts.len() != 2 {
-                room.send(RoomMessageEventContent::text_plain(error_message), None).await.unwrap();
+                room.send(RoomMessageEventContent::text_plain(error_message)).await.unwrap();
                 return true;
             }
 
             let emoji = parts[0];
             let social_credit_opt = parts[1].parse::<i32>();
-            if social_credit_opt.is_err() || emoji.len() == 0 || emoji == " " {
-                room.send(RoomMessageEventContent::text_plain(error_message), None).await.unwrap();
+            if social_credit_opt.is_err() || emoji.is_empty() || emoji == " " {
+                room.send(RoomMessageEventContent::text_plain(error_message)).await.unwrap();
                 return true;
             }
             let social_credit = social_credit_opt.unwrap();
@@ -323,7 +296,7 @@ impl EventHandler {
             let room_id = &room.room_id().to_string();
 
             if find_emoji_in_db(&self.conn, &emoji.to_string(), room_id).is_some() {
-                room.send(RoomMessageEventContent::text_plain("Emoji already registered"), None).await.unwrap();
+                room.send(RoomMessageEventContent::text_plain("Emoji already registered")).await.unwrap();
                 return true;
             }
 
@@ -338,7 +311,7 @@ impl EventHandler {
                 println!("Unable to insert emoji into db"); // error level
                 return true;
             }
-            room.send(RoomMessageEventContent::text_plain(format!("Emoji registered: {} with social credit score: {}", emoji.emoji, emoji.social_credit)), None).await.unwrap();
+            room.send(RoomMessageEventContent::text_plain(format!("Emoji registered: {} with social credit score: {}", emoji.emoji, emoji.social_credit))).await.unwrap();
             true;
         }
         false
@@ -347,13 +320,13 @@ impl EventHandler {
     /// Update the user in the cache and the database, also updates the room data in the database
     /// if the user has room_data
     fn update_user_in_db(&self, user: &User) {
-        if user.room_data.is_some() {
-            if update_user_room_data(&self.conn, &user.clone().room_data.unwrap()).is_err() {
-                println!("Unable to update user room data in db"); // error level
-            }
+        if user.room_data.is_some()
+            && update_user_room_data(&self.conn, &user.clone().room_data.unwrap()).is_err()
+        {
+            println!("Unable to update user room data in db"); // error level
         }
 
-        if update_user(&self.conn, &user).is_err() {
+        if update_user(&self.conn, user).is_err() {
             println!("Unable to update user in db"); // error level
         }
     }
@@ -362,4 +335,3 @@ impl EventHandler {
         name == self.bot_username && url == self.homeserver_url_without_protocol
     }
 }
-

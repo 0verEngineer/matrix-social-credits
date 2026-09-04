@@ -6,7 +6,7 @@ use std::env;
 use matrix_sdk::{
     Client, config::SyncSettings,
 };
-use matrix_sdk::room::Room;
+use matrix_sdk::Room;
 use matrix_sdk::ruma::events::AnySyncMessageLikeEvent;
 use std::sync::{Arc, Mutex};
 use rusqlite::{Connection};
@@ -55,7 +55,11 @@ async fn main() -> anyhow::Result<()> {
     create_table_event(&conn);
 
     let client = Client::builder().homeserver_url(homeserver_url.clone()).build().await?;
-    client.login_username(username.as_str(), &*password).initial_device_display_name("Social Credit System").send().await?;
+    client.matrix_auth()
+        .login_username(username.as_str(), password.as_str())
+        .initial_device_display_name("Social Credit System")
+        .send()
+        .await?;
     client.add_event_handler(on_stripped_state_member);
 
     let shared_conn = Arc::new(Mutex::new(conn));
@@ -68,7 +72,7 @@ async fn main() -> anyhow::Result<()> {
         reaction_limit,
     ));
 
-    initial_admin_user_setup(&shared_conn, &admin_username, &homeserver_url_relative);
+    initial_admin_user_setup(&shared_conn, &admin_username, homeserver_url_relative);
 
     client.add_event_handler({
         let event_handler = event_handler.clone();
@@ -91,5 +95,5 @@ fn get_env_var_as_i32(var_name: &str) -> i32 {
         .and_then(|value| {
             value.parse::<i32>().map_err(|e| format!("Failed to parse {}: {}", var_name, e))
         })
-        .expect(&format!("Failed to parse {}", var_name))
+        .unwrap_or_else(|e| panic!("Failed to parse {}: {}", var_name, e))
 }
