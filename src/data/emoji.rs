@@ -89,3 +89,10 @@ fn do_get_emoji_sql<P:Params>(
 
     return emoji;
 }
+
+pub fn delete_emoji(conn: &Arc<Mutex<Connection>>, emoji: &String, room_id: &String) -> Result<usize, Error> {
+    let sql = "DELETE FROM emoji WHERE emoji = ?1 AND room_id = ?2";
+    let connection = conn.lock().unwrap();
+
+    connection.execute(sql, params![emoji, room_id])
+}

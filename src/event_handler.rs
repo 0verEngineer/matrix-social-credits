@@ -2,10 +2,10 @@ use std::sync::{Arc, Mutex};
 use matrix_sdk::{Room, RoomState};
 use matrix_sdk::ruma::{events};
 use matrix_sdk::ruma::events::{AnySyncMessageLikeEvent, AnySyncTimelineEvent};
-use matrix_sdk::ruma::events::room::message::{MessageType, RoomMessageEventContent};
+use matrix_sdk::ruma::events::room::message::{MessageType, Relation, RoomMessageEventContent};
 use matrix_sdk::ruma::{OwnedUserId, UserId};
 use rusqlite::Connection;
-use crate::data::emoji::{Emoji, find_emoji_in_db, insert_emoji};
+use crate::data::emoji::{Emoji, delete_emoji, find_emoji_in_db, insert_emoji};
 use crate::data::event::{Event, find_event_in_db, insert_event};
 use crate::data::user::{update_user, User, UserType};
 use crate::data::user_room_data::update_user_room_data;
@@ -165,7 +165,7 @@ impl EventHandler {
                 return;
             }
 
-            let mut sender = sender.unwrap();
+            let sender = sender.unwrap();
 
             if let events::AnyMessageLikeEventContent::RoomMessage(content) = event.original_content().unwrap() {
                 match content.msgtype {
@@ -173,20 +173,60 @@ impl EventHandler {
                     _ => { return; }
                 }
 
-                let body = content.body();
-
-                // commands
-                let mut stripped_body: String = body.to_string();
-                if body.starts_with("* ") {
-                    stripped_body = body.strip_prefix("* ").unwrap().to_string();
+                // An edit carries the new text prefixed with "* " in its fallback body. The
+                // old code stripped that prefix and then ran the command again, so editing a
+                // "!list" message re-triggered it -- and a plain message starting with "* "
+                // (a markdown bullet) was parsed as a command. Edits are ignored instead; the
+                // original event was already handled when it arrived.
+                if matches!(content.relates_to, Some(Relation::Replacement(_))) {
+                    trace!(event_id = %event.event_id(), "Ignoring an edit");
+                    return;
                 }
 
-                if self.handle_help(&room, &mut stripped_body).await { return; };
-                if self.handle_list(&room, &mut stripped_body).await { return; };
-                if self.handle_list_emojis(&room, &mut stripped_body).await { return; };
-                if self.handle_register_emoji(room, &mut sender, &mut stripped_body).await { return; }
+                self.handle_command(&room, &sender, content.body().trim()).await;
             }
         }
+    }
+
+    /// Dispatch a chat command.
+    ///
+    /// Each handler used to be called in sequence behind `if handler(..).await { return; }`,
+    /// but every one of them ended in `true;` -- a statement, not a return value -- so they
+    /// all returned `false` and none of those early returns ever fired.
+    async fn handle_command(&self, room: &Room, sender: &User, body: &str) {
+        let command = body.split_whitespace().next().unwrap_or_default();
+        let arguments = body[command.len()..].trim();
+
+        match command {
+            "!help" => self.handle_help(room).await,
+            "!list" => self.handle_list(room).await,
+            "!list_emoji" | "!list-emoji" | "!list_emojis" | "!list-emojis" => {
+                self.handle_list_emojis(room).await
+            }
+            "!register_emoji" | "!register-emoji" => {
+                self.handle_register_emoji(room, sender, arguments).await
+            }
+            "!unregister_emoji" | "!unregister-emoji" => {
+                self.handle_unregister_emoji(room, sender, arguments).await
+            }
+            _ => {}
+        }
+    }
+
+    /// Answer with the usage hint unless the sender is an admin.
+    ///
+    /// Returns `true` when the sender may go ahead.
+    async fn require_admin(&self, room: &Room, sender: &User) -> bool {
+        if matches!(sender.user_type, UserType::Admin) {
+            return true;
+        }
+
+        send_message(
+            room,
+            RoomMessageEventContent::text_plain("You are not allowed to use this command"),
+        )
+        .await;
+        false
     }
 
     fn check_and_handle_event_already_handled(&self, event: &AnySyncMessageLikeEvent) -> bool {
@@ -216,99 +256,113 @@ impl EventHandler {
         false
     }
 
-    async fn handle_list(&self, room: &Room, stripped_body: &mut String) -> bool {
-        if stripped_body == "!list" {
-            let answer = get_user_list_answer(&self.conn, room, &self.own_user_id);
-            let content = RoomMessageEventContent::text_html(answer.text, answer.html);
-            send_message(room, content).await;
-            true;
-        }
-        false
+    async fn handle_list(&self, room: &Room) {
+        let answer = get_user_list_answer(&self.conn, room, &self.own_user_id);
+        send_message(room, RoomMessageEventContent::text_html(answer.text, answer.html)).await;
     }
 
-    async fn handle_list_emojis(&self, room: &Room, stripped_body: &mut String) -> bool {
-        if stripped_body == "!list_emoji" || stripped_body == "!list-emoji" || stripped_body == "!list_emojis" || stripped_body == "!list-emojis" {
-            let answer = get_emoji_list_answer(&self.conn, room);
-            let content = RoomMessageEventContent::text_html(answer.text, answer.html);
-            send_message(room, content).await;
-            true;
-        }
-        false
+    async fn handle_list_emojis(&self, room: &Room) {
+        let answer = get_emoji_list_answer(&self.conn, room);
+        send_message(room, RoomMessageEventContent::text_html(answer.text, answer.html)).await;
     }
 
-    async fn handle_help(&self, room: &Room, stripped_body: &mut String) -> bool {
-        if stripped_body == "!help" {
-            let help_body = "<h3>Commands:</h3><br>
+    async fn handle_help(&self, room: &Room) {
+        let help_body = "<h3>Commands:</h3><br>
                 - <b>!list</b>: List all users and their social credit score for the current room<br><br>
                 - <b>!list_emoji</b>: List all registered emojis and their social credit score for the current room<br><br>
-                - <b>!register_emoji</b> <emoji> <social_credit>: Register an emoji with a social credit score for the current room. Example: !register_emoji 😑 -25
+                - <b>!register_emoji</b> <emoji> <social_credit>: Register an emoji with a social credit score for the current room. Example: !register_emoji 😑 -25<br><br>
+                - <b>!unregister_emoji</b> <emoji>: Remove a registered emoji from the current room. Example: !unregister_emoji 😑
             ".to_string();
-            let content = RoomMessageEventContent::text_html(help_body.clone(), help_body);
-            send_message(room, content).await;
-            true;
-        }
-        false
+        send_message(room, RoomMessageEventContent::text_html(help_body.clone(), help_body)).await;
     }
 
-    async fn handle_register_emoji(&self, room: Room, sender: &mut User, body: &mut String) -> bool {
-        if body.starts_with("!register_emoji") || body.starts_with("!register-emoji") {
-            match sender.clone().user_type {
-                UserType::Admin => {},
-                _ => {
-                    send_message(&room, RoomMessageEventContent::text_plain("You are not allowed to use this command")).await;
-                    return true;
-                }
-            }
-
-            let error_message = "Invalid command usage! Example: !register-emoji 😑 -25";
-            let mut text_opt = body.strip_prefix("!register_emoji");
-            if text_opt.is_none() {
-                text_opt = body.strip_prefix("!register-emoji");
-                if text_opt.is_none() {
-                    send_message(&room, RoomMessageEventContent::text_plain(error_message)).await;
-                    return true;
-                }
-            }
-            let mut parts = text_opt.unwrap().split(" ").collect::<Vec<&str>>();
-            if parts.len() == 3 && parts[0].is_empty() {
-                parts.remove(0);
-            }
-
-            if parts.len() != 2 {
-                send_message(&room, RoomMessageEventContent::text_plain(error_message)).await;
-                return true;
-            }
-
-            let emoji = parts[0];
-            let social_credit_opt = parts[1].parse::<i32>();
-            if social_credit_opt.is_err() || emoji.is_empty() || emoji == " " {
-                send_message(&room, RoomMessageEventContent::text_plain(error_message)).await;
-                return true;
-            }
-            let social_credit = social_credit_opt.unwrap();
-
-            let room_id = &room.room_id().to_string();
-
-            if find_emoji_in_db(&self.conn, &emoji.to_string(), room_id).is_some() {
-                send_message(&room, RoomMessageEventContent::text_plain("Emoji already registered")).await;
-                return true;
-            }
-
-            let emoji = Emoji {
-                id: -1,
-                room_id: room_id.to_string(),
-                emoji: emoji.to_string(),
-                social_credit,
-            };
-
-            if insert_emoji(&self.conn, &emoji).is_err() {
-                error!(emoji = %emoji.emoji, "Unable to insert emoji into db");
-                return true;
-            }
-            send_message(&room, RoomMessageEventContent::text_plain(format!("Emoji registered: {} with social credit score: {}", emoji.emoji, emoji.social_credit))).await;
-            true;
+    async fn handle_register_emoji(&self, room: &Room, sender: &User, arguments: &str) {
+        if !self.require_admin(room, sender).await {
+            return;
         }
-        false
+
+        let error_message = "Invalid command usage! Example: !register-emoji 😑 -25";
+
+        // split_whitespace also copes with several spaces between the arguments, which the
+        // previous split(" ") plus "drop a leading empty part" special case did not.
+        let parts = arguments.split_whitespace().collect::<Vec<&str>>();
+        if parts.len() != 2 {
+            send_message(room, RoomMessageEventContent::text_plain(error_message)).await;
+            return;
+        }
+
+        let emoji_text = parts[0];
+        let Ok(social_credit) = parts[1].parse::<i32>() else {
+            send_message(room, RoomMessageEventContent::text_plain(error_message)).await;
+            return;
+        };
+
+        let room_id = &room.room_id().to_string();
+
+        if find_emoji_in_db(&self.conn, &emoji_text.to_string(), room_id).is_some() {
+            send_message(room, RoomMessageEventContent::text_plain("Emoji already registered")).await;
+            return;
+        }
+
+        let emoji = Emoji {
+            id: -1,
+            room_id: room_id.to_string(),
+            emoji: emoji_text.to_string(),
+            social_credit,
+        };
+
+        if insert_emoji(&self.conn, &emoji).is_err() {
+            error!(emoji = %emoji.emoji, "Unable to insert emoji into db");
+            send_message(room, RoomMessageEventContent::text_plain("Failed to register the emoji")).await;
+            return;
+        }
+
+        send_message(
+            room,
+            RoomMessageEventContent::text_plain(format!(
+                "Emoji registered: {} with social credit score: {}",
+                emoji.emoji, emoji.social_credit
+            )),
+        )
+        .await;
+    }
+
+    /// Remove a registered emoji again.
+    ///
+    /// Without this a typo in `!register_emoji` was permanent -- there was no way to correct
+    /// or drop an entry short of editing the database by hand.
+    async fn handle_unregister_emoji(&self, room: &Room, sender: &User, arguments: &str) {
+        if !self.require_admin(room, sender).await {
+            return;
+        }
+
+        let error_message = "Invalid command usage! Example: !unregister-emoji 😑";
+
+        let parts = arguments.split_whitespace().collect::<Vec<&str>>();
+        if parts.len() != 1 {
+            send_message(room, RoomMessageEventContent::text_plain(error_message)).await;
+            return;
+        }
+
+        let emoji_text = parts[0].to_string();
+        let room_id = room.room_id().to_string();
+
+        if find_emoji_in_db(&self.conn, &emoji_text, &room_id).is_none() {
+            send_message(room, RoomMessageEventContent::text_plain("Emoji is not registered")).await;
+            return;
+        }
+
+        if delete_emoji(&self.conn, &emoji_text, &room_id).is_err() {
+            error!(emoji = %emoji_text, "Unable to delete emoji from db");
+            send_message(room, RoomMessageEventContent::text_plain("Failed to remove the emoji")).await;
+            return;
+        }
+
+        send_message(
+            room,
+            RoomMessageEventContent::text_plain(format!("Emoji removed: {emoji_text}")),
+        )
+        .await;
     }
 
     /// Update the user in the cache and the database, also updates the room data in the database
