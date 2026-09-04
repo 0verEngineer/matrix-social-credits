@@ -1,8 +1,8 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 use rusqlite::{Connection, Error, params, Result};
-use crate::data::user_reaction::{get_user_reactions, UserReaction};
-use tracing::error;
+use crate::data::user_reaction::{has_reacted_to_message, insert_user_reaction, recent_reaction_window};
+use tracing::{error, warn};
 
 
 #[derive(Clone)]
@@ -11,56 +11,107 @@ pub struct UserRoomData {
     pub user_id: i32,
     pub room_id: String,
     pub social_credit: i32,
-    pub reactions: Vec<UserReaction>,
 }
 
 impl UserRoomData {
-    /// Checks if a user is able to react and change the social credit of another user,
-    /// returns 0 if the user can react,
-    /// returns the time in seconds until the user can react again otherwise
-    pub fn get_time_till_user_can_react(&self, reaction_period_minutes: i32, reaction_limit: i32) -> i64 {
-        let now = SystemTime::now();
-
-        // Filter out the reactions that are outside the reaction_period_minutes
-        let recent_reactions: Vec<_> = self.reactions.iter()
-            .filter(|&reaction| now.duration_since(reaction.time).unwrap() <= Duration::from_secs((reaction_period_minutes * 60) as u64))
-            .collect();
-
-        // If there are less than reaction_limit within the reaction_period_minutes, the user can react
-        if recent_reactions.len() < reaction_limit as usize {
+    /// Seconds until this user may change somebody's score again, `0` if they may right now.
+    ///
+    /// The rule is "at most `reaction_limit` reactions within `reaction_period_minutes".
+    /// Once the limit is reached, the wait is until the *oldest* reaction in the window drops
+    /// out of it -- that is the first moment a slot frees up. The previous implementation
+    /// measured from the *newest* one instead, so with a limit of 2 over 20 minutes and
+    /// reactions at t=0 and t=19, it reported a wait until t=39 although t=20 was correct.
+    ///
+    /// It also called `duration_since(..).unwrap()` on every stored reaction, which panics as
+    /// soon as one of them lies in the future -- possible after an NTP step or a container
+    /// moving between hosts.
+    pub fn get_time_till_user_can_react(
+        &self,
+        conn: &Arc<Mutex<Connection>>,
+        reaction_period_minutes: i32,
+        reaction_limit: i32,
+    ) -> i64 {
+        if reaction_limit <= 0 {
             return 0;
         }
 
-        // Calculate the time until the most recent of these can expire
-        if let Some(latest_reaction) = recent_reactions.iter().max() {
-            if let Ok(time_since_latest) = now.duration_since(latest_reaction.time) {
-                let time_left = Duration::from_secs((reaction_period_minutes * 60) as u64) - time_since_latest;
-                return time_left.as_secs() as i64;
+        let period = Duration::from_secs(reaction_period_minutes.max(0) as u64 * 60);
+        let now = SystemTime::now();
+        let window_start = now.checked_sub(period).unwrap_or(SystemTime::UNIX_EPOCH);
+
+        let (count, oldest) = {
+            let connection = match conn.lock() {
+                Ok(connection) => connection,
+                Err(_) => {
+                    error!("Database mutex is poisoned");
+                    return 0;
+                }
+            };
+
+            match recent_reaction_window(&connection, self.id, window_start) {
+                Ok(window) => window,
+                Err(error) => {
+                    warn!(%error, "Unable to read the reaction window, allowing the reaction");
+                    return 0;
+                }
+            }
+        };
+
+        if count < reaction_limit as u32 {
+            return 0;
+        }
+
+        let Some(oldest) = oldest else {
+            return 0;
+        };
+
+        // A reaction timestamped in the future would make duration_since fail; treat it as
+        // "just happened" so the user waits the full period instead of the code panicking.
+        let elapsed = now.duration_since(oldest).unwrap_or(Duration::ZERO);
+        period.saturating_sub(elapsed).as_secs() as i64
+    }
+
+    pub fn has_user_already_reacted_to_message_event_id(
+        &self,
+        conn: &Arc<Mutex<Connection>>,
+        message_event_id: &str,
+    ) -> bool {
+        let connection = match conn.lock() {
+            Ok(connection) => connection,
+            Err(_) => {
+                error!("Database mutex is poisoned");
+                return true;
+            }
+        };
+
+        match has_reacted_to_message(&connection, self.id, message_event_id) {
+            Ok(reacted) => reacted,
+            Err(error) => {
+                // Be conservative: on a read error, do not score the reaction twice.
+                warn!(%error, "Unable to check for an earlier reaction, skipping this one");
+                true
             }
         }
-
-        // In case of any unexpected issue, assume the user can react
-        0
     }
 
-    pub fn has_user_already_reacted_to_message_event_id(&self, message_event_id: &String) -> bool {
-        self.reactions.iter().any(|reaction| reaction.message_event_id == *message_event_id)
-    }
+    pub fn add_reaction(&mut self, conn: &Arc<Mutex<Connection>>, message_event_id: &str) {
+        let connection = match conn.lock() {
+            Ok(connection) => connection,
+            Err(_) => {
+                error!("Database mutex is poisoned");
+                return;
+            }
+        };
 
-    pub fn add_reaction(&mut self, conn: &Arc<Mutex<Connection>>, message_event_id: &String) {
-        let now = SystemTime::now();
-        let reaction = UserReaction::new(self.id, now, message_event_id.clone());
-        self.reactions.push(reaction.clone());
-
-        if reaction.insert(&conn.lock().unwrap()).is_err() {
-            error!("Failed to insert user reaction");
+        if let Err(error) = insert_user_reaction(&connection, self.id, SystemTime::now(), message_event_id) {
+            error!(%error, "Failed to insert user reaction");
         }
 
-        // user_reaction rows are kept indefinitely on purpose. The table serves two
-        // purposes at once: the cooldown window, which only looks at recent rows, and the
-        // "has this user already reacted to this message" check, which has to remember every
-        // reaction. A time based cleanup would quietly break the second one and let old
-        // messages be scored again. The rows are tiny and indexed.
+        // user_reaction rows are kept indefinitely on purpose. The table serves the cooldown
+        // window, which only looks at recent rows, and the "has this user already reacted to
+        // this message" check, which has to remember every reaction. A time based cleanup
+        // would quietly break the second one and let old messages be scored again. The rows
+        // are tiny and indexed.
     }
 }
 
@@ -117,26 +168,12 @@ pub fn find_user_room_data_by_user_id_and_room_id(conn: &Arc<Mutex<Connection>>,
     let mut rows = stmt.query(params![&user_id, room_id])?;
 
     if let Some(row) = rows.next()? {
-        let reaction_result = get_user_reactions(&connection, row.get(0)?);
-        let reactions = if let Ok(r) = &reaction_result {
-            if r.is_empty() {
-                Vec::<UserReaction>::new()
-            } else {
-                r.clone() // Clone is required since `r` is a reference and we want to own the data
-            }
-        } else {
-            Vec::<UserReaction>::new()
-        };
-
-        let user_room_data = UserRoomData {
+        Ok(UserRoomData {
             id: row.get(0)?,
             user_id: row.get(1)?,
             room_id: row.get(2)?,
             social_credit: row.get(3)?,
-            reactions: reactions
-        };
-
-        Ok(user_room_data)
+        })
     }
     else {
         Err(Error::QueryReturnedNoRows)

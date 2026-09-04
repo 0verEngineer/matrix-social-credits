@@ -1,6 +1,5 @@
 use std::sync::{Arc, Mutex};
 use rusqlite::{Connection, Error, params, Params, Statement, ToSql};
-use crate::data::user_reaction::{get_user_reactions, UserReaction};
 use crate::data::user_room_data::UserRoomData;
 use tracing::{error, warn};
 
@@ -121,7 +120,7 @@ pub fn find_all_users_with_room_data_in_db(
         }
     };
 
-    let users = do_get_user_sql_inner(params, &mut stmt, &connection, true);
+    let users = do_get_user_sql_inner(params, &mut stmt, true);
 
     match users {
         Ok(users) => Some(users),
@@ -146,12 +145,12 @@ fn do_get_user_sql<P: Params>(
         }
     };
 
-    let users = do_get_user_sql_inner(params, &mut stmt, &connection, false);
+    let users = do_get_user_sql_inner(params, &mut stmt, false);
 
     return users;
 }
 
-fn do_get_user_sql_inner<P: Params>(params: P, stmt: &mut Statement, conn: &Connection, with_room_data: bool) -> Result<Vec<User>, Error> {
+fn do_get_user_sql_inner<P: Params>(params: P, stmt: &mut Statement, with_room_data: bool) -> Result<Vec<User>, Error> {
     let users: Result<Vec<User>, _> = stmt.query_map(params, |row| {
         Ok(User {
             id: row.get(0)?,
@@ -169,10 +168,6 @@ fn do_get_user_sql_inner<P: Params>(params: P, stmt: &mut Statement, conn: &Conn
                     user_id: row.get(5)?,
                     room_id: row.get(6)?,
                     social_credit: row.get(7)?,
-                    reactions: get_user_reactions(conn, row.get(4)?)
-                        .or_else(|_| -> Result<Vec<UserReaction>, Error> {
-                            Ok(Vec::<UserReaction>::new())
-                        }).unwrap(),
                 }),
                 false => None,
             },

@@ -81,14 +81,6 @@ impl EventHandler {
                 }
 
                 let sender_user_room_data = sender.clone().room_data.unwrap();
-                let time_till_user_can_react = sender_user_room_data.get_time_till_user_can_react(self.reaction_period_minutes, self.reaction_limit);
-                if time_till_user_can_react > 0 {
-                    let minutes = time_till_user_can_react / 60;
-                    let seconds = time_till_user_can_react % 60;
-                    let text = format!("{}, you are still on cooldown, remaining time: {}m {}s", sender.name, minutes, seconds);
-                    send_message(&room, RoomMessageEventContent::text_html(text.clone(), text)).await;
-                    return;
-                }
 
                 // The reaction points at the message it annotates. In ruma 0.16 the annotation is
                 // reachable directly via `relates_to`, the Relation enum detour is gone.
@@ -124,20 +116,39 @@ impl EventHandler {
                         return;
                     };
 
-                    if sender_user_room_data.has_user_already_reacted_to_message_event_id(&message_like_event.event_id().to_string()) {
+                    let annotated_message_id = message_like_event.event_id().to_string();
+
+                    if sender_user_room_data
+                        .has_user_already_reacted_to_message_event_id(&self.conn, &annotated_message_id)
+                    {
                         debug!(sender = %format_args!("@{}:{}", sender.name, sender.url), event_id = %event.event_id(), "Sender already reacted to this message event");
                         return;
                     }
 
-                    let sender_clone = sender.clone();
-
-                    if compare_user(&recipient, &sender_clone) {
+                    if compare_user(&recipient, &sender) {
                         debug!("Sender and recipient of reaction are the same user");
                         return;
                     }
 
                     if recipient.room_data.is_none() {
                         error!(user = %recipient.name, "Recipient of reaction does not have room data");
+                        return;
+                    }
+
+                    // The cooldown is checked last, once it is clear that this reaction would
+                    // actually count. Checking it up front meant telling a user to wait for a
+                    // reaction that was going to be dropped anyway -- a duplicate, or a
+                    // reaction to their own message.
+                    let time_till_user_can_react = sender_user_room_data.get_time_till_user_can_react(
+                        &self.conn,
+                        self.reaction_period_minutes,
+                        self.reaction_limit,
+                    );
+                    if time_till_user_can_react > 0 {
+                        let minutes = time_till_user_can_react / 60;
+                        let seconds = time_till_user_can_react % 60;
+                        let text = format!("{}, you are still on cooldown, remaining time: {}m {}s", sender.name, minutes, seconds);
+                        send_message(&room, RoomMessageEventContent::text_html(text.clone(), text)).await;
                         return;
                     }
 
@@ -157,7 +168,7 @@ impl EventHandler {
                         }
                     };
 
-                    sender.room_data.unwrap().add_reaction(&self.conn, &message_like_event.event_id().to_string());
+                    sender.room_data.unwrap().add_reaction(&self.conn, &annotated_message_id);
 
                     let text = format!("<b>{}</b> changed <b>{}'s</b> Social Credit Score using {} from <b>{}</b> to <b>{}</b>", sender.name, recipient.name, emoji.emoji, old_social_credit, new_social_credit);
                     send_message(&room, RoomMessageEventContent::text_html(text.clone(), text)).await;

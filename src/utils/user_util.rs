@@ -85,7 +85,6 @@ fn setup_user_room_data_for_room(conn: &Arc<Mutex<Connection>>, room: Option<Roo
             user_id: user.id,
             room_id,
             social_credit: initial_social_credit,
-            reactions: Vec::new(),
         };
 
         if insert_user_room_data(conn, &room_data).is_err() {
