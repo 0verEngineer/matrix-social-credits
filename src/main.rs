@@ -20,8 +20,8 @@ use std::time::Duration;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-// todo session preservation and emoji verification
-// todo query all room users on initial setup and create user_room_data for every user, also handle user joining
+// Still open: verify that a registered "emoji" really is one, and create the room data for
+// every member when the bot joins a room instead of only for users it has seen an event from.
 
 /// Log level defaults. Overridable via `RUST_LOG`, e.g.
 /// `RUST_LOG=matrix_social_credits=debug,matrix_sdk=info`.

@@ -61,7 +61,7 @@ impl EventHandler {
 
         let sender = setup_user(
             &self.conn,
-            Some(room.clone()),
+            Some(room.room_id().as_str()),
             event.sender(),
             UserType::Default,
             self.initial_social_credit,
@@ -130,7 +130,7 @@ impl EventHandler {
 
                     let recipient_opt = setup_user(
                         &self.conn,
-                        Some(room.clone()),
+                        Some(room.room_id().as_str()),
                         recipient_user_id,
                         UserType::Default,
                         self.initial_social_credit,

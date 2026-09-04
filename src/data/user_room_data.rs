@@ -173,13 +173,13 @@ pub fn add_social_credit(
 pub fn find_user_room_data_by_user_id_and_room_id(
     conn: &Arc<Mutex<Connection>>,
     user_id: i32,
-    room_id: &String,
+    room_id: &str,
 ) -> Result<UserRoomData, Error> {
     let sql = "SELECT id, user_id, room_id, social_credit FROM user_room_data WHERE user_id=?1 AND room_id=?2";
     let connection = conn.lock().unwrap();
 
     let mut stmt = connection.prepare(sql)?;
-    let mut rows = stmt.query(params![&user_id, room_id])?;
+    let mut rows = stmt.query(params![user_id, room_id])?;
 
     if let Some(row) = rows.next()? {
         Ok(UserRoomData {
@@ -227,7 +227,7 @@ mod tests {
             },
         )
         .unwrap();
-        find_user_room_data_by_user_id_and_room_id(db, 1, &ROOM.to_owned()).unwrap()
+        find_user_room_data_by_user_id_and_room_id(db, 1, ROOM).unwrap()
     }
 
     fn record_reaction(
@@ -337,8 +337,7 @@ mod tests {
             235
         );
 
-        let reloaded =
-            find_user_room_data_by_user_id_and_room_id(&db, 1, &ROOM.to_owned()).unwrap();
+        let reloaded = find_user_room_data_by_user_id_and_room_id(&db, 1, ROOM).unwrap();
         assert_eq!(reloaded.social_credit, 235);
     }
 

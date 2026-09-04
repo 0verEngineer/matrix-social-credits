@@ -53,9 +53,13 @@ pub fn resolve_configured_user_id(
     UserId::parse(format!("@{configured}:{server_name}")).ok()
 }
 
+/// Look up a user, creating the row and the room data if they are not there yet.
+///
+/// `room_id` is `None` when there is no room context, which is the case for the admin setup
+/// at startup.
 pub fn setup_user(
     conn: &Arc<Mutex<Connection>>,
-    room: Option<Room>,
+    room_id: Option<&str>,
     user_id: &UserId,
     user_type: UserType,
     initial_social_credit: i32,
@@ -64,7 +68,7 @@ pub fn setup_user(
 
     let user_opt = find_user_in_db(conn, &username, &domain);
     if let Some(mut actual_user) = user_opt {
-        setup_user_room_data_for_room(conn, room, &mut actual_user, initial_social_credit);
+        setup_user_room_data_for_room(conn, room_id, &mut actual_user, initial_social_credit);
         return Some(actual_user);
     }
 
@@ -83,7 +87,7 @@ pub fn setup_user(
             error!(user = %user_id, "Failed to find user in db after inserting");
             return None;
         };
-        setup_user_room_data_for_room(conn, room, &mut inserted_user, initial_social_credit);
+        setup_user_room_data_for_room(conn, room_id, &mut inserted_user, initial_social_credit);
         return Some(inserted_user);
     }
 
@@ -92,32 +96,42 @@ pub fn setup_user(
 
 fn setup_user_room_data_for_room(
     conn: &Arc<Mutex<Connection>>,
-    room: Option<Room>,
+    room_id: Option<&str>,
     user: &mut User,
     initial_social_credit: i32,
 ) {
-    if let Some(room) = room {
-        let room_id = room.room_id().to_string();
+    let Some(room_id) = room_id else {
+        return;
+    };
 
-        if let Ok(room_data) = find_user_room_data_by_user_id_and_room_id(conn, user.id, &room_id) {
-            user.room_data = Some(room_data);
-            return;
-        }
-
-        debug!(user = %user.name, %room_id, "Room data for user not found in db, creating");
-
-        let room_data = UserRoomData {
-            id: -1,
-            user_id: user.id,
-            room_id,
-            social_credit: initial_social_credit,
-        };
-
-        if insert_user_room_data(conn, &room_data).is_err() {
-            error!(user = %user.name, "Failed to insert room data for user");
-        }
-
+    if let Ok(room_data) = find_user_room_data_by_user_id_and_room_id(conn, user.id, room_id) {
         user.room_data = Some(room_data);
+        return;
+    }
+
+    debug!(user = %user.name, room_id, "Room data for user not found in db, creating");
+
+    let room_data = UserRoomData {
+        id: -1,
+        user_id: user.id,
+        room_id: room_id.to_owned(),
+        social_credit: initial_social_credit,
+    };
+
+    if let Err(error) = insert_user_room_data(conn, &room_data) {
+        // A uniqueness violation here means a concurrently handled event created the row
+        // first, in which case the lookup below finds theirs.
+        debug!(user = %user.name, %error, "Unable to insert room data for user");
+    }
+
+    // Read the row back instead of keeping the struct built above: that one still carries the
+    // placeholder id -1, and the row id is what the user_reaction rows reference. Storing it
+    // meant every reaction of a user new to the room was rejected by the foreign key.
+    match find_user_room_data_by_user_id_and_room_id(conn, user.id, room_id) {
+        Ok(stored) => user.room_data = Some(stored),
+        Err(error) => {
+            error!(user = %user.name, room_id, %error, "Room data for user is missing after insert");
+        }
     }
 }
 
@@ -329,6 +343,8 @@ mod db_tests {
     use crate::data::user::UserType;
     use crate::test_support::test_db;
 
+    const ROOM: &str = "!room:example.org";
+
     /// setup_user does a non-atomic find, insert, find. Calling it twice must not end up with
     /// two rows for the same person -- which is what the "Multiple users found" log line in
     /// the old code was about.
@@ -377,5 +393,79 @@ mod db_tests {
 
         assert_eq!(created.name, "alice");
         assert_eq!(created.url, "example.org");
+    }
+
+    /// The room data used to be handed back with the placeholder id -1 it was built with,
+    /// because the insert never read the row back. user_reaction rows reference that id, so
+    /// the first reaction of a user new to a room was rejected by the foreign key -- meaning
+    /// it was never recorded, the cooldown did not count it, and the same message could be
+    /// scored a second time.
+    #[test]
+    fn room_data_of_a_new_user_carries_the_real_row_id() {
+        let db = test_db();
+
+        let user = setup_user(
+            &db,
+            Some(ROOM),
+            user_id!("@alice:example.org"),
+            UserType::Default,
+            250,
+        )
+        .unwrap();
+
+        let mut room_data = user.room_data.expect("room data must be created");
+        assert!(
+            room_data.id > 0,
+            "expected a real row id, got {}",
+            room_data.id
+        );
+
+        // The foreign key only accepts an existing row, so this is what actually proves it.
+        room_data.add_reaction(&db, "$m1");
+        assert!(room_data.has_user_already_reacted_to_message_event_id(&db, "$m1"));
+    }
+
+    #[test]
+    fn room_data_of_a_known_user_is_read_from_the_database() {
+        let db = test_db();
+
+        let first = setup_user(
+            &db,
+            Some(ROOM),
+            user_id!("@alice:example.org"),
+            UserType::Default,
+            250,
+        )
+        .unwrap();
+        let second = setup_user(
+            &db,
+            Some(ROOM),
+            user_id!("@alice:example.org"),
+            UserType::Default,
+            250,
+        )
+        .unwrap();
+
+        assert_eq!(
+            first.room_data.unwrap().id,
+            second.room_data.unwrap().id,
+            "the second call must find the existing row, not create another one"
+        );
+    }
+
+    #[test]
+    fn without_a_room_no_room_data_is_created() {
+        let db = test_db();
+
+        let user = setup_user(
+            &db,
+            None,
+            user_id!("@alice:example.org"),
+            UserType::Default,
+            250,
+        )
+        .unwrap();
+
+        assert!(user.room_data.is_none());
     }
 }
