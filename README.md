@@ -221,6 +221,23 @@ resumes where the previous run stopped instead of replaying the timeline.
 
 Back up `STORE_PATH` together with the database, or the bot logs in again and re-syncs.
 
+### Encrypted rooms
+The bot works in encrypted rooms. `STORE_PATH` also holds its crypto store, so the device and
+its room keys survive a restart -- which is what keeps the bot able to read messages sent
+while it was down, once it catches up.
+
+Two consequences worth knowing:
+
+- Delete `STORE_PATH` and the bot loses its device identity along with every room key it had.
+  It logs in again as a new device and can only read messages sent from that point on. The old
+  devices stay on the account until somebody removes them in a client.
+- The bot is an unverified session. That is fine by default, but see
+  [Limitations](#limitations) if members of your room restrict encryption to verified
+  sessions.
+
+Reactions are not encrypted in Matrix, so scoring keeps working in an encrypted room even for
+messages the bot cannot read.
+
 ### Rate limits and restarts
 Synapse answers with `429 M_LIMIT_EXCEEDED` fairly often, especially while the Matrix stack is
 coming back up. The bot handles this in three places:
@@ -262,8 +279,13 @@ The bot handles `SIGTERM` and `Ctrl-C`, so `docker stop` shuts it down cleanly.
 
 <!-- LIMITATIONS -->
 ## Limitations
-- **Encrypted rooms are not supported.** The bot is built without end-to-end encryption, so it
-  cannot read messages or reactions in encrypted rooms. Use it in unencrypted rooms.
+- **The bot's device is never verified.** It works in encrypted rooms, but it shows up as an
+  unverified session. Anybody who has "never send encrypted messages to unverified sessions"
+  switched on will not share room keys with it, so the bot cannot read *their* messages. Their
+  reactions still count -- reactions are not encrypted in Matrix.
+- **Only messages sent after the bot's device existed can be read.** The bot cannot decrypt
+  anything from before it joined, and deleting `STORE_PATH` throws its identity away and
+  starts a new device.
 - There is exactly one admin, configured through `ADMIN_USERNAME`. There is no command to
   promote anybody.
 - Removing a reaction does not undo the score change.

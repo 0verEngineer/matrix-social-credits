@@ -8,9 +8,18 @@ license = "GPL-3.0-only"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-# default-features would pull in e2e-encryption + the sqlite stores. The bot does not
-# support encrypted rooms yet, so we keep the dependency tree small for now.
-matrix-sdk = { version = "0.18.0", default-features = false, features = ["bundled-sqlite"] }
+# e2e-encryption is not optional in practice: matrix-sdk 0.6.2 had it through its default
+# features, so the bot has always been able to work in encrypted rooms, and it is being run in
+# one. Without the feature it would answer in plaintext into an encrypted room and never see a
+# command again.
+#
+# automatic-room-key-forwarding is part of the upstream defaults but is left off on purpose:
+# it only requests and shares room keys between a single user's own devices, and the bot
+# account has exactly one.
+matrix-sdk = { version = "0.18.0", default-features = false, features = [
+    "bundled-sqlite",
+    "e2e-encryption",
+] }
 anyhow = "1.0.104"
 rusqlite = { version = "0.37", features = ["bundled"] }
 tokio = { version = "1.53.1", features = ["full"] }

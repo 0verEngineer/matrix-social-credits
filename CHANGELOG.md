@@ -39,7 +39,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 - `!unregister_emoji` to remove a registered emoji.
 - Session and client state persistence, so a restart neither creates a new device nor triggers
-  a full initial sync.
+  a full initial sync. `STORE_PATH` also holds the crypto store, so in encrypted rooms the bot
+  keeps its device and its room keys across restarts -- previously the crypto store was in
+  memory and every restart produced a new device that could only read new messages.
 - Versioned database migrations, uniqueness constraints, indexes and WAL mode.
 - Retention for the `event` deduplication table, which previously grew without bound.
 - Structured logging through `tracing`, configurable with `RUST_LOG`.
@@ -55,7 +57,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Bot answers are `m.notice` instead of `m.text`.
 - `ADMIN_USERNAME` also accepts a full Matrix id.
 - Multi-stage container image on `debian:trixie-slim` running as a non-root user, roughly
-  138 MB instead of about 1.5 GB.
+  160 MB instead of about 1.5 GB.
 - Version scheme: `0.0.9-alpha` → `0.1.0`. The `-alpha` suffix is gone; the leading `0.`
   already says that nothing here is stable. `Cargo.toml` is the single source of truth for
   the version, and CI refuses to publish an image whose tag disagrees with it.
