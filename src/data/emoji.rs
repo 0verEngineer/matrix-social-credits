@@ -36,7 +36,7 @@ pub fn insert_emoji(conn: &Arc<Mutex<Connection>>, emoji: &Emoji) -> Result<(), 
 }
 
 pub fn find_emoji_in_db(conn: &Arc<Mutex<Connection>>, emoji: &String, room_id: &String) -> Option<Emoji> {
-    let sql = "SELECT * FROM emoji WHERE emoji = :emoji AND room_id = :room_id";
+    let sql = "SELECT id, room_id, emoji, social_credit FROM emoji WHERE emoji = ?1 AND room_id = ?2";
     let params = params![emoji, room_id];
     match do_get_emoji_sql(conn, sql, params) {
         Ok(mut emoji) => {
@@ -53,7 +53,7 @@ pub fn find_emoji_in_db(conn: &Arc<Mutex<Connection>>, emoji: &String, room_id: 
 }
 
 pub fn find_all_emoji_for_room_in_db(conn: &Arc<Mutex<Connection>>, room_id: &String) -> Option<Vec<Emoji>> {
-    let sql = "SELECT * FROM emoji WHERE room_id = :room_id";
+    let sql = "SELECT id, room_id, emoji, social_credit FROM emoji WHERE room_id = ?1";
     let params = params![room_id];
     match do_get_emoji_sql(conn, sql, params) {
         Ok(emoji) => Some(emoji),

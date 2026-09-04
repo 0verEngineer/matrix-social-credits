@@ -4,6 +4,37 @@ use rusqlite::Connection;
 use crate::data::emoji::find_all_emoji_for_room_in_db;
 use crate::data::user::{HtmlAndTextAnswer};
 
+/// Unicode variation selectors. VS16 asks for the coloured emoji presentation, VS15 for the
+/// monochrome text presentation. Clients disagree on whether to send them, so the same emoji
+/// arrives with and without.
+const VARIATION_SELECTOR_15: char = '\u{fe0e}';
+const VARIATION_SELECTOR_16: char = '\u{fe0f}';
+
+/// Emoji modifiers Fitzpatrick-1 through Fitzpatrick-6 (skin tones).
+const SKIN_TONE_RANGE: std::ops::RangeInclusive<char> = '\u{1f3fb}'..='\u{1f3ff}';
+
+/// Bring an emoji into the single form used both when registering it and when looking it up
+/// for a reaction.
+///
+/// Registration did not normalize at all while the lookup stripped VS16 -- and only when the
+/// string ended with it, though it then removed every occurrence. So an admin whose client
+/// sends "😑\u{fe0f}" registered an entry that could never be found again.
+///
+/// Skin tone modifiers are stripped as well: 👍 and 👍🏽 are the same reaction as far as the
+/// score is concerned, and requiring a separate registration per skin tone would just mean
+/// that most people's reactions silently do nothing.
+pub fn normalize_emoji(emoji: &str) -> String {
+    emoji
+        .trim()
+        .chars()
+        .filter(|c| {
+            *c != VARIATION_SELECTOR_15
+                && *c != VARIATION_SELECTOR_16
+                && !SKIN_TONE_RANGE.contains(c)
+        })
+        .collect()
+}
+
 pub fn get_emoji_list_answer(conn: &Arc<Mutex<Connection>>, room: &Room) -> HtmlAndTextAnswer {
     let emojis_opt = find_all_emoji_for_room_in_db(conn, &room.room_id().to_string());
     let empty_answer = HtmlAndTextAnswer {

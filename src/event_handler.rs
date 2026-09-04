@@ -9,7 +9,7 @@ use crate::data::emoji::{Emoji, delete_emoji, find_emoji_in_db, insert_emoji};
 use crate::data::event::{Event, find_event_in_db, insert_event};
 use crate::data::user::{update_user, User, UserType};
 use crate::data::user_room_data::update_user_room_data;
-use crate::utils::emoji_util::get_emoji_list_answer;
+use crate::utils::emoji_util::{get_emoji_list_answer, normalize_emoji};
 use crate::utils::matrix_util::send_message;
 use crate::utils::user_util::{compare_user, get_user_list_answer, setup_user};
 use tracing::{debug, error, trace};
@@ -66,10 +66,7 @@ impl EventHandler {
 
             if let events::AnyMessageLikeEventContent::Reaction(content) = event.original_content().unwrap() {
                 trace!(?content, "Reaction content");
-                let mut emoji_text = content.relates_to.key.clone();
-                if emoji_text.ends_with("\u{fe0f}") {
-                    emoji_text = emoji_text.replace("\u{fe0f}", "");
-                }
+                let emoji_text = normalize_emoji(&content.relates_to.key);
 
                 let emoji = find_emoji_in_db(&self.conn, &emoji_text, &room.room_id().to_string());
                 if emoji.is_none() {
@@ -291,15 +288,20 @@ impl EventHandler {
             return;
         }
 
-        let emoji_text = parts[0];
+        let emoji_text = normalize_emoji(parts[0]);
         let Ok(social_credit) = parts[1].parse::<i32>() else {
             send_message(room, RoomMessageEventContent::text_plain(error_message)).await;
             return;
         };
 
+        if emoji_text.is_empty() {
+            send_message(room, RoomMessageEventContent::text_plain(error_message)).await;
+            return;
+        }
+
         let room_id = &room.room_id().to_string();
 
-        if find_emoji_in_db(&self.conn, &emoji_text.to_string(), room_id).is_some() {
+        if find_emoji_in_db(&self.conn, &emoji_text, room_id).is_some() {
             send_message(room, RoomMessageEventContent::text_plain("Emoji already registered")).await;
             return;
         }
@@ -307,7 +309,7 @@ impl EventHandler {
         let emoji = Emoji {
             id: -1,
             room_id: room_id.to_string(),
-            emoji: emoji_text.to_string(),
+            emoji: emoji_text,
             social_credit,
         };
 
@@ -344,7 +346,7 @@ impl EventHandler {
             return;
         }
 
-        let emoji_text = parts[0].to_string();
+        let emoji_text = normalize_emoji(parts[0]);
         let room_id = room.room_id().to_string();
 
         if find_emoji_in_db(&self.conn, &emoji_text, &room_id).is_none() {
