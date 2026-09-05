@@ -145,12 +145,16 @@ pre-release suffix (`0.2.0-rc.1`) is published under that exact tag only and mov
 
 | Name | Kind | Needed for |
 | --- | --- | --- |
-| `DOCKERHUB_USERNAME` | secret **or** variable | pushing any image |
+| `DOCKERHUB_USERNAME` | **variable** | pushing any image |
 | `DOCKERHUB_TOKEN` | secret | pushing any image; needs the *Read, Write, Delete* scope so closed pull request tags can be cleaned up again |
 | `CODEBERG_TOKEN` | secret | the Codeberg mirror |
 
-The user name is not sensitive, so a repository variable of that name works just as well as a
-secret; the workflow takes whichever exists.
+`DOCKERHUB_USERNAME` has to be a **variable**, not a secret, and the workflow stops with an
+explicit error if it finds a secret of that name. The user name is the first half of the
+public image name, so nothing is gained by hiding it -- but GitHub masks secret values
+everywhere, and it drops a job output that contains one instead of passing it on. The tag list
+would arrive empty at the publish job, and every log line would read
+`***/matrix-social-credits`.
 
 Without them the workflow still builds both architectures and says in the job summary which
 one is missing. Note that a run only sees the secrets and variables that existed when it

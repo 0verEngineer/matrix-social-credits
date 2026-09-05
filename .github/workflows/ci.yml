@@ -72,10 +72,12 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-          # The user name is not a secret, so it is accepted as a variable too -- that is
-          # where it naturally ends up, and having it only there used to look exactly like
-          # "no credentials configured".
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME || vars.DOCKERHUB_USERNAME }}
+          # A variable, deliberately not a secret. The user name is the first half of the
+          # public image name, so making it a secret means GitHub masks it everywhere -- and
+          # a job output that contains a secret is dropped rather than passed on, which
+          # silently empties the tag list this workflow hands to the publish job.
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+          USERNAME_IS_A_SECRET: ${{ secrets.DOCKERHUB_USERNAME != '' }}
           HAS_TOKEN: ${{ secrets.DOCKERHUB_TOKEN != '' }}
         run: |
           set -euo pipefail
@@ -93,6 +95,16 @@ jobs:
             exit 1
           fi
           echo "Version from Cargo.toml: $version"
+
+          # Fail here rather than three jobs later with "can't push with no tags specified".
+          if [ "$USERNAME_IS_A_SECRET" = "true" ]; then
+            echo "::error::DOCKERHUB_USERNAME exists as a repository secret. It has to be a"\
+                 "repository variable instead: the value is part of the public image name, and"\
+                 "GitHub masks secret values everywhere, including in job outputs -- which then"\
+                 "reach the publish job empty. Delete the secret and add a variable of the same"\
+                 "name under Settings -> Secrets and variables -> Actions -> Variables."
+            exit 1
+          fi
 
           sha=${PR_HEAD_SHA:-$GITHUB_SHA}
           short_sha=${sha:0:7}
@@ -181,10 +193,9 @@ jobs:
               echo "because $reason."
               if [ -n "$credentials_hint" ]; then
                 echo
-                echo "Set it under **Settings → Secrets and variables → Actions**."
-                echo "\`DOCKERHUB_TOKEN\` has to be a secret; \`DOCKERHUB_USERNAME\` may be either a"
-                echo "secret or a variable. A secret added *after* this run started does not apply to"
-                echo "it -- start a new run."
+                echo "Set it under **Settings → Secrets and variables → Actions**:"
+                echo "\`DOCKERHUB_TOKEN\` as a secret, \`DOCKERHUB_USERNAME\` as a *variable*."
+                echo "A value added *after* this run started does not apply to it -- start a new run."
               fi
             } >> "$GITHUB_STEP_SUMMARY"
           fi
@@ -219,7 +230,7 @@ jobs:
         if: needs.meta.outputs.push == 'true'
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME || vars.DOCKERHUB_USERNAME }}
+          username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       # Each runner pushes its own single-arch image without a tag; the publish job below
@@ -292,7 +303,7 @@ jobs:
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME || vars.DOCKERHUB_USERNAME }}
+          username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Create the multi-arch manifest
