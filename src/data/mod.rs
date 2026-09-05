@@ -1,3 +1,5 @@
+pub mod activity;
+pub mod bot_state;
 pub mod emoji;
 pub mod event;
 pub mod migrations;

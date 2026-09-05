@@ -12,19 +12,6 @@ pub struct Emoji {
     pub social_credit: i32,
 }
 
-pub fn create_table_emoji(conn: &Connection) {
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS emoji (
-            id INTEGER PRIMARY KEY,
-            room_id TEXT NOT NULL,
-            emoji TEXT NOT NULL,
-            social_credit INTEGER NOT NULL
-    )",
-        [],
-    )
-    .expect("Failed to create emoji table");
-}
-
 pub fn insert_emoji(conn: &Arc<Mutex<Connection>>, emoji: &Emoji) -> Result<(), Error> {
     let sql = "INSERT INTO emoji (room_id, emoji, social_credit) VALUES (?1, ?2, ?3)";
     let connection = conn.lock().unwrap();

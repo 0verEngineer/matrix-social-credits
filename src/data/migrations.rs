@@ -4,15 +4,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::{Connection, Error, params};
 use tracing::{info, warn};
 
-use crate::data::emoji::create_table_emoji;
-use crate::data::event::create_table_event;
-use crate::data::user::create_table_user;
-use crate::data::user_reaction::create_table_user_reaction;
-use crate::data::user_room_data::create_table_user_room_data;
 use crate::utils::emoji_util::normalize_emoji;
 
+// Every schema statement the bot has ever issued lives in this file, in the migration that
+// introduced it. That is the whole point of the arrangement: a migration is a record of what
+// happened, so none of the SQL below may be edited after it has shipped. `event` has no
+// `seen_at` column in migration 1 because migration 2 adds it -- "tidying that up" would make
+// migration 2 fail on a fresh database with a duplicate column, and only for new installs.
+
 /// Schema version this build expects. Stored in SQLite's `user_version`.
-const SCHEMA_VERSION: i32 = 2;
+const SCHEMA_VERSION: i32 = 3;
 
 /// How long SQLite waits for a lock before returning SQLITE_BUSY.
 const BUSY_TIMEOUT_MS: i32 = 5_000;
@@ -59,11 +60,7 @@ pub fn migrate(conn: &Connection) -> Result<(), Error> {
 
     if version < 1 {
         info!("Applying schema migration 1: base tables");
-        create_table_user(conn);
-        create_table_user_room_data(conn);
-        create_table_user_reaction(conn);
-        create_table_emoji(conn);
-        create_table_event(conn);
+        migrate_to_v1(conn)?;
         version = 1;
         conn.pragma_update(None, "user_version", version)?;
     }
@@ -75,8 +72,59 @@ pub fn migrate(conn: &Connection) -> Result<(), Error> {
         conn.pragma_update(None, "user_version", version)?;
     }
 
+    if version < 3 {
+        info!("Applying schema migration 3: activity counters, bot state");
+        migrate_to_v3(conn)?;
+        version = 3;
+        conn.pragma_update(None, "user_version", version)?;
+    }
+
     let _ = version;
     Ok(())
+}
+
+/// The schema as it was before it was versioned.
+///
+/// `IF NOT EXISTS` throughout, because the databases this first meets are the ones that
+/// already have these tables and a `user_version` of 0.
+fn migrate_to_v1(conn: &Connection) -> Result<(), Error> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS user (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            url TEXT NOT NULL,
+            user_type INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS user_room_data (
+            id INTEGER PRIMARY KEY,
+            user_id INTEGER NOT NULL REFERENCES user(id),
+            room_id TEXT NOT NULL,
+            social_credit INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS user_reaction (
+            id INTEGER PRIMARY KEY,
+            user_room_data_id INTEGER NOT NULL REFERENCES user_room_data(id),
+            time INTEGER NOT NULL,
+            message_event_id TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS emoji (
+            id INTEGER PRIMARY KEY,
+            room_id TEXT NOT NULL,
+            emoji TEXT NOT NULL,
+            social_credit INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS event (
+            id TEXT PRIMARY KEY,
+            event_type TEXT NOT NULL,
+            handled INTEGER NOT NULL
+        );
+        ",
+    )
 }
 
 /// Deduplicate the existing rows, then add the uniqueness the code always assumed.
@@ -147,6 +195,24 @@ fn migrate_to_v2(conn: &Connection) -> Result<(), Error> {
     conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_event_seen_at ON event (seen_at);")?;
 
     Ok(())
+}
+
+/// Counters for the weekly activity payout, and somewhere to remember when the last one was.
+fn migrate_to_v3(conn: &Connection) -> Result<(), Error> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS activity (
+            user_room_data_id INTEGER PRIMARY KEY REFERENCES user_room_data(id) ON DELETE CASCADE,
+            messages INTEGER NOT NULL DEFAULT 0,
+            images INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS bot_state (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        ",
+    )
 }
 
 /// Rewrite stored emojis through [`normalize_emoji`].

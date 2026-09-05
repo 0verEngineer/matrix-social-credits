@@ -190,6 +190,17 @@ if you are unsure.
 | `HTTP_MAX_RETRY_TIME_SECS` | `60` | Upper bound for the wait between two attempts of the same request. |
 | `LOGIN_RETRY_BUDGET_SECS` | `900` | How long the initial login keeps retrying before the bot gives up and exits. |
 | `EVENT_RETENTION_DAYS` | `30` | How long the deduplication markers in the `event` table are kept. |
+| `ACTIVITY_POINTS_PER_MESSAGE` | `1` | Social credit per message in the weekly payout. `0` stops counting messages. |
+| `ACTIVITY_POINTS_PER_IMAGE` | `5` | Social credit per image in the weekly payout. `0` stops counting images. |
+| `ACTIVITY_INACTIVITY_PENALTY` | `50` | Deducted from anybody who spends a whole period in a room without sending anything. `0` switches the penalty off. |
+| `ACTIVITY_PAYOUT_DAY` | `sunday` | Weekday of the payout, English name or three letter form. |
+| `ACTIVITY_PAYOUT_TIME` | `20:00` | Time of day of the payout, `HH:MM`. |
+| `ACTIVITY_PAYOUT_TIMEZONE` | `TZ`, else `UTC` | IANA time zone the day and time are read in, for example `Europe/Vienna`. |
+| `ACTIVITY_PAYOUT_MAX_ENTRIES` | `10` | How many people the payout message names before it summarises the rest. |
+
+Setting **all three** point values to `0` switches the weekly payout off completely: nothing is
+counted and no message is posted. The penalty counts as one of them, because working out who
+was idle needs the same counters as awarding points does.
 
 
 <!-- COMMANDS -->
@@ -213,6 +224,58 @@ React with a registered emoji to a message to change the score of the user who s
 - Variation selectors and skin tone modifiers are ignored, so 👍 and 👍🏽 are the same emoji as
   far as the bot is concerned.
 
+
+### The weekly payout
+
+Besides reactions, the bot rewards taking part at all — and charges for not taking part. It
+counts what everybody sends and settles up once a week.
+
+| Counted as a message | Counted as an image | Not counted |
+| --- | --- | --- |
+| text, emotes (`/me`) | images | reactions, videos, files, audio, locations, notices |
+
+Commands to the bot do not count either — asking for `!list` twenty times is not an
+achievement. Editing a message does not count a second time.
+
+At the configured time the counters are converted into points and added to everybody's score.
+Anybody who is in the room, already has a score there and sent **nothing** at all loses
+`ACTIVITY_INACTIVITY_PENALTY` instead. Both are announced in the room in a single message:
+
+```
+🧧 Weekly Social Credit
+
+1. alice: +38 (23 messages, 3 images)
+2. bob: +21 (16 messages, 1 image)
+3. carol: +12 (12 messages)
+
+Idle: dave, erin — -50 each
+
+3 comrades earned 71 points, 2 idle comrades lost 100 points this period
+```
+
+Beyond `ACTIVITY_PAYOUT_MAX_ENTRIES` people the list stops naming names and adds a line like
+`… and 9 more comrades, +45 together`, so a busy room does not produce a wall of text every
+week. The idle are always a single line, however many of them there are.
+
+Details worth knowing:
+
+- **The period is "since the last payout", not a fixed seven days.** If the bot is down over
+  the payout time it settles up when it comes back, once, covering the whole time it was away
+  — including the penalty.
+- **Counting is per room.** Points are earned, and the penalty charged, in the room they
+  belong to, the same way scores work everywhere else in the bot.
+- **Only members are charged.** Somebody who left the room keeps their score untouched; it is
+  deliberately kept for them in case they come back. Somebody who is in the room but has never
+  sent anything at all has no score yet, and none is invented for them.
+- **A room the bot cannot read the member list for is skipped entirely** for that period,
+  awards included — charging people it cannot confirm are still there would eat exactly the
+  scores it keeps for those who left. That room's counters are kept rather than discarded, so
+  the next payout still covers them.
+- **The first period after switching the feature on does not charge the penalty.** It runs
+  from the moment the bot starts to the next payout, which can be a few hours; docking
+  everybody who did not happen to write in that window would be a poor introduction. Anything
+  shorter than half a week is treated that way.
+- **There is no floor.** A score can go negative, from the penalty as much as from a reaction.
 
 <!-- OPERATING -->
 ## Operating the bot

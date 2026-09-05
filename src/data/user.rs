@@ -24,19 +24,6 @@ pub struct HtmlAndTextAnswer {
     pub html: String,
 }
 
-pub fn create_table_user(conn: &Connection) {
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS user (
-            id INTEGER PRIMARY KEY,
-            name TEXT NOT NULL,
-            url TEXT NOT NULL,
-            user_type INTEGER NOT NULL
-    )",
-        [],
-    )
-    .expect("Failed to create user table");
-}
-
 pub fn insert_user(conn: &Arc<Mutex<Connection>>, user: &User) -> Result<(), Error> {
     let sql = "INSERT INTO user (name, url, user_type) VALUES (?1, ?2, ?3)";
     let user_type_as_int = get_user_type_as_int(user);

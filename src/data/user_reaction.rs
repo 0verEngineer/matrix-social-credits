@@ -7,19 +7,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, Error, params};
 
-pub fn create_table_user_reaction(conn: &Connection) {
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS user_reaction (
-                id INTEGER PRIMARY KEY,
-                user_room_data_id INTEGER NOT NULL REFERENCES user_room_data(id),
-                time INTEGER NOT NULL,
-                message_event_id TEXT NOT NULL
-        )",
-        [],
-    )
-    .expect("Failed to create user_reaction table");
-}
-
 /// Record a reaction at `time`.
 pub fn insert_user_reaction(
     conn: &Connection,

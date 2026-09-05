@@ -37,6 +37,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `.gitignore`.
 
 ### Added
+- A weekly activity payout. Messages and images are counted per user and per room and turned
+  into social credit on a schedule — by default Sunday at 20:00, one point per message and
+  five per image — announced in the room in a single, length-capped message. Reactions,
+  commands and edits do not count. Configurable through `ACTIVITY_POINTS_PER_MESSAGE`,
+  `ACTIVITY_POINTS_PER_IMAGE`, `ACTIVITY_PAYOUT_DAY`, `ACTIVITY_PAYOUT_TIME`,
+  `ACTIVITY_PAYOUT_TIMEZONE` and `ACTIVITY_PAYOUT_MAX_ENTRIES`; all values at zero switches
+  it off.
+- An inactivity penalty as the other half of that payout: anybody who spends a whole period in
+  a room without sending anything loses `ACTIVITY_INACTIVITY_PENALTY`, 50 by default. Only
+  people who are still in the room and already have a score there are charged, and never for a
+  period shorter than half a week — the first one after switching the feature on is usually
+  only a few hours long.
 - `!unregister_emoji` to remove a registered emoji.
 - Session and client state persistence, so a restart neither creates a new device nor triggers
   a full initial sync. `STORE_PATH` also holds the crypto store, so in encrypted rooms the bot

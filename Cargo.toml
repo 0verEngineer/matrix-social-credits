@@ -21,6 +21,10 @@ matrix-sdk = { version = "0.18.0", default-features = false, features = [
     "e2e-encryption",
 ] }
 anyhow = "1.0.104"
+# For the weekly payout schedule. chrono-tz carries the IANA database in the binary, so the
+# configured time zone works without the image having to ship tzdata.
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+chrono-tz = "0.10.4"
 rusqlite = { version = "0.37", features = ["bundled"] }
 tokio = { version = "1.53.1", features = ["full"] }
 tracing = "0.1.44"

@@ -118,19 +118,6 @@ impl UserRoomData {
     }
 }
 
-pub fn create_table_user_room_data(conn: &Connection) {
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS user_room_data (
-            id INTEGER PRIMARY KEY,
-            user_id INTEGER NOT NULL REFERENCES user(id),
-            room_id TEXT NOT NULL,
-            social_credit INTEGER NOT NULL
-    )",
-        [],
-    )
-    .expect("Failed to create user_room_data table");
-}
-
 pub fn insert_user_room_data(
     conn: &Arc<Mutex<Connection>>,
     user_room_data: &UserRoomData,
@@ -162,12 +149,54 @@ pub fn add_social_credit(
     room_id: &str,
     delta: i32,
 ) -> Result<i32, Error> {
+    let connection = conn.lock().unwrap();
+    add_social_credit_on(&connection, user_id, room_id, delta)
+}
+
+/// Same as [`add_social_credit`], for callers that already hold the connection -- the payout
+/// applies every change of a period inside one transaction.
+pub fn add_social_credit_on(
+    conn: &Connection,
+    user_id: i32,
+    room_id: &str,
+    delta: i32,
+) -> Result<i32, Error> {
     let sql = "UPDATE user_room_data SET social_credit = social_credit + ?1 \
                WHERE user_id = ?2 AND room_id = ?3 \
                RETURNING social_credit";
-    let connection = conn.lock().unwrap();
 
-    connection.query_row(sql, params![delta, user_id, room_id], |row| row.get(0))
+    conn.query_row(sql, params![delta, user_id, room_id], |row| row.get(0))
+}
+
+/// Everybody who has a score in this room.
+///
+/// The activity payout needs the full list, not just the people who did something: whoever is
+/// on it and has no activity is the one who gets docked.
+pub fn users_with_room_data(conn: &Connection, room_id: &str) -> Result<Vec<RoomUser>, Error> {
+    let mut stmt = conn.prepare(
+        "SELECT u.id, u.name, u.url \
+           FROM user_room_data d \
+           JOIN user u ON u.id = d.user_id \
+          WHERE d.room_id = ?1",
+    )?;
+
+    let rows = stmt.query_map(params![room_id], |row| {
+        Ok(RoomUser {
+            user_id: row.get(0)?,
+            name: row.get(1)?,
+            url: row.get(2)?,
+        })
+    })?;
+
+    rows.collect()
+}
+
+/// A user that has a score in some room, in the shape the `user` table stores.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoomUser {
+    pub user_id: i32,
+    pub name: String,
+    pub url: String,
 }
 
 pub fn find_user_room_data_by_user_id_and_room_id(

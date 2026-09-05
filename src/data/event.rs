@@ -10,18 +10,6 @@ pub struct Event {
     pub handled: bool,
 }
 
-pub fn create_table_event(conn: &Connection) {
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS event (
-            id TEXT PRIMARY KEY,
-            event_type TEXT NOT NULL,
-            handled INTEGER NOT NULL
-    )",
-        [],
-    )
-    .expect("Failed to create event table");
-}
-
 pub fn insert_event(conn: &Arc<Mutex<Connection>>, event: &Event) -> Result<(), Error> {
     // seen_at is what the retention job in data::migrations keys off.
     let sql = "INSERT INTO event (id, event_type, handled, seen_at) VALUES (?1, ?2, ?3, ?4)";

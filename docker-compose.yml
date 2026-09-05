@@ -26,6 +26,18 @@ services:
       # Client state store and saved session
       STORE_PATH: /data/store
 
+      # Weekly activity payout. Set all of these to 0 to switch it off.
+      # ACTIVITY_POINTS_PER_MESSAGE: 1
+      # ACTIVITY_POINTS_PER_IMAGE: 5
+      # Deducted from anybody who spends the whole period in the room without sending anything
+      # ACTIVITY_INACTIVITY_PENALTY: 50
+      # ACTIVITY_PAYOUT_DAY: sunday
+      # ACTIVITY_PAYOUT_TIME: "20:00"
+      # Without this the schedule falls back to TZ, and then to UTC -- so 20:00 would not be
+      # 20:00 where you live.
+      # ACTIVITY_PAYOUT_TIMEZONE: Europe/Vienna
+      # ACTIVITY_PAYOUT_MAX_ENTRIES: 10
+
       # Optional, shown with their defaults:
       # RUST_LOG: matrix_social_credits=info,matrix_sdk=warn
       # HTTP_RETRY_LIMIT: 10

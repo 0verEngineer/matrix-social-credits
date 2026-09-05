@@ -1,3 +1,4 @@
+use crate::data::activity::{ActivityKind, record_activity};
 use crate::data::emoji::{Emoji, delete_emoji, find_emoji_in_db, insert_emoji};
 use crate::data::event::{Event, find_event_in_db, insert_event};
 use crate::data::user::{User, UserType};
@@ -26,6 +27,8 @@ pub struct EventHandler {
     initial_social_credit: i32,
     reaction_period_minutes: i32,
     reaction_limit: i32,
+    /// Whether messages and images are counted towards the weekly payout.
+    activity_enabled: bool,
 }
 
 impl EventHandler {
@@ -35,6 +38,7 @@ impl EventHandler {
         initial_social_credit: i32,
         reaction_period_minutes: i32,
         reaction_limit: i32,
+        activity_enabled: bool,
     ) -> Self {
         EventHandler {
             conn,
@@ -42,6 +46,7 @@ impl EventHandler {
             initial_social_credit,
             reaction_period_minutes,
             reaction_limit,
+            activity_enabled,
         }
     }
 
@@ -240,35 +245,59 @@ impl EventHandler {
             if let events::AnyMessageLikeEventContent::RoomMessage(content) =
                 event.original_content().unwrap()
             {
-                match content.msgtype {
-                    MessageType::Text(..) => {}
-                    _ => {
-                        return;
-                    }
+                // Text and emotes count as messages, images as images. Everything else --
+                // video, audio, files, locations, notices -- is left alone rather than
+                // guessed at; reactions never reach this branch at all.
+                let activity = match content.msgtype {
+                    MessageType::Text(..) | MessageType::Emote(..) => Some(ActivityKind::Message),
+                    MessageType::Image(..) => Some(ActivityKind::Image),
+                    _ => None,
+                };
+                if activity.is_none() {
+                    return;
                 }
+                let is_text = matches!(content.msgtype, MessageType::Text(..));
 
                 // An edit carries the new text prefixed with "* " in its fallback body. The
                 // old code stripped that prefix and then ran the command again, so editing a
                 // "!list" message re-triggered it -- and a plain message starting with "* "
                 // (a markdown bullet) was parsed as a command. Edits are ignored instead; the
-                // original event was already handled when it arrived.
+                // original event was already handled when it arrived. They must not count
+                // towards the payout either, or editing a message ten times would pay ten
+                // times.
                 if matches!(content.relates_to, Some(Relation::Replacement(_))) {
                     trace!(event_id = %event.event_id(), "Ignoring an edit");
                     return;
                 }
 
-                self.handle_command(&room, &sender, content.body().trim())
-                    .await;
+                let was_a_command = if is_text {
+                    self.handle_command(&room, &sender, content.body().trim())
+                        .await
+                } else {
+                    false
+                };
+
+                // Talking to the bot is not an achievement.
+                if was_a_command {
+                    return;
+                }
+
+                if let Some(kind) = activity {
+                    self.count_activity(&sender, kind);
+                }
             }
         }
     }
 
-    /// Dispatch a chat command.
+    /// Dispatch a chat command, reporting whether the message was one.
     ///
     /// Each handler used to be called in sequence behind `if handler(..).await { return; }`,
     /// but every one of them ended in `true;` -- a statement, not a return value -- so they
     /// all returned `false` and none of those early returns ever fired.
-    async fn handle_command(&self, room: &Room, sender: &User, body: &str) {
+    ///
+    /// The return value is what keeps commands out of the activity count, without a second
+    /// list of command names that could drift away from this one.
+    async fn handle_command(&self, room: &Room, sender: &User, body: &str) -> bool {
         let (command, arguments) = split_command(body);
 
         match command {
@@ -283,8 +312,24 @@ impl EventHandler {
             "!unregister_emoji" | "!unregister-emoji" => {
                 self.handle_unregister_emoji(room, sender, arguments).await
             }
-            _ => {}
+            _ => return false,
         }
+
+        true
+    }
+
+    /// Count one message or image towards the weekly payout.
+    fn count_activity(&self, sender: &User, kind: ActivityKind) {
+        if !self.activity_enabled {
+            return;
+        }
+
+        let Some(room_data) = sender.room_data.as_ref() else {
+            debug!(user = %sender.name, "No room data, not counting the activity");
+            return;
+        };
+
+        record_activity(&self.conn, room_data.id, kind);
     }
 
     /// Answer with the usage hint unless the sender is an admin.

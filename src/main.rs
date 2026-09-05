@@ -8,6 +8,8 @@ use crate::data::migrations::{cleanup_events, open_and_migrate};
 use crate::event_handler::EventHandler;
 use crate::utils::autojoin::on_stripped_state_member;
 use crate::utils::matrix_util::{Retryable, authenticate, classify_error, log_retry_configuration};
+use crate::utils::payout::{PayoutConfig, spawn_payout_task};
+use crate::utils::schedule::PayoutSchedule;
 use crate::utils::session::SessionStore;
 use crate::utils::user_util::{initial_admin_user_setup, resolve_configured_user_id};
 use matrix_sdk::Room;
@@ -54,6 +56,22 @@ const DEFAULT_EVENT_RETENTION_DAYS: u32 = 30;
 /// How often the retention job runs.
 const EVENT_CLEANUP_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 
+/// Social credit awarded per message in the weekly activity payout.
+const DEFAULT_POINTS_PER_MESSAGE: i32 = 1;
+
+/// Social credit awarded per image in the weekly activity payout.
+const DEFAULT_POINTS_PER_IMAGE: i32 = 5;
+
+/// When the weekly activity payout happens.
+const DEFAULT_PAYOUT_DAY: &str = "sunday";
+const DEFAULT_PAYOUT_TIME: &str = "20:00";
+
+/// Deducted from anybody who spent a whole period in a room without sending anything.
+const DEFAULT_INACTIVITY_PENALTY: i32 = 50;
+
+/// How many people the payout announcement names before summarising the rest.
+const DEFAULT_PAYOUT_MAX_ENTRIES: usize = 10;
+
 fn init_logging() {
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_LOG_FILTER));
@@ -92,6 +110,20 @@ async fn main() -> anyhow::Result<()> {
 
     let event_retention_days =
         optional_env_var("EVENT_RETENTION_DAYS", DEFAULT_EVENT_RETENTION_DAYS);
+
+    let payout_config = PayoutConfig {
+        points_per_message: optional_env_var(
+            "ACTIVITY_POINTS_PER_MESSAGE",
+            DEFAULT_POINTS_PER_MESSAGE,
+        ),
+        points_per_image: optional_env_var("ACTIVITY_POINTS_PER_IMAGE", DEFAULT_POINTS_PER_IMAGE),
+        inactivity_penalty: optional_env_var(
+            "ACTIVITY_INACTIVITY_PENALTY",
+            DEFAULT_INACTIVITY_PENALTY,
+        ),
+        max_entries: optional_env_var("ACTIVITY_PAYOUT_MAX_ENTRIES", DEFAULT_PAYOUT_MAX_ENTRIES),
+    };
+    let payout_schedule = payout_schedule_from_env()?;
 
     // Database setup, including the schema migrations and the connection pragmas.
     let conn = open_and_migrate(&db_path)?;
@@ -146,10 +178,22 @@ async fn main() -> anyhow::Result<()> {
         initial_social_credit,
         reaction_timespan,
         reaction_limit,
+        payout_config.is_enabled(),
     ));
 
     initial_admin_user_setup(&shared_conn, &admin_user_id);
     spawn_event_cleanup(shared_conn.clone(), event_retention_days);
+
+    if payout_config.is_enabled() {
+        spawn_payout_task(
+            shared_conn.clone(),
+            client.clone(),
+            payout_schedule,
+            payout_config,
+        );
+    } else {
+        info!("Activity payout is disabled, all of its values are zero");
+    }
 
     client.add_event_handler({
         let event_handler = event_handler.clone();
@@ -261,6 +305,23 @@ async fn shutdown_signal() {
     {
         let _ = tokio::signal::ctrl_c().await;
     }
+}
+
+/// Read the activity payout schedule from the environment.
+///
+/// The time zone falls back to `TZ` before UTC, because that is the variable people already
+/// set on a container -- but it is spelled out in its own variable so the schedule does not
+/// silently depend on the image shipping a time zone database.
+fn payout_schedule_from_env() -> anyhow::Result<PayoutSchedule> {
+    let day = env::var("ACTIVITY_PAYOUT_DAY").unwrap_or_else(|_| DEFAULT_PAYOUT_DAY.to_owned());
+    let time = env::var("ACTIVITY_PAYOUT_TIME").unwrap_or_else(|_| DEFAULT_PAYOUT_TIME.to_owned());
+    let timezone = env::var("ACTIVITY_PAYOUT_TIMEZONE")
+        .or_else(|_| env::var("TZ"))
+        .unwrap_or_else(|_| "UTC".to_owned());
+
+    PayoutSchedule::new(&day, &time, &timezone).map_err(|error| {
+        anyhow::anyhow!("Invalid activity payout schedule: {error}. Check ACTIVITY_PAYOUT_DAY, ACTIVITY_PAYOUT_TIME and ACTIVITY_PAYOUT_TIMEZONE.")
+    })
 }
 
 /// Put the client state store next to the database file by default.
