@@ -70,6 +70,33 @@ Matrix bot for a social credit system
 - Invite the bot into a room; it accepts invitations automatically.
 - The admin registers the emojis that change the score, see [Commands](#commands).
 
+### Which user the container runs as
+
+The image runs as a non-root user, uid `10001`, so the data directory has to be readable and
+writable by it. Otherwise the bot stops on the first start with
+`Error code 14: Unable to open the database file`.
+
+Either give the directory to that uid:
+
+```sh
+sudo chown -R 10001:10001 ./data
+```
+
+Or, if you would rather keep the directory as it is, tell the container to run as its owner:
+
+```yaml
+services:
+  matrix-social-credit:
+    user: "1000:1000"     # id -u : id -g of whoever owns ./data
+```
+
+`user:` overrides the uid baked into the image, and any value works — the uid does not need to
+exist inside the container. Everything the bot writes then belongs to that user on the host.
+
+There is deliberately no environment variable for this. Setting the uid is the container
+runtime's job, and doing it in the bot instead would mean starting as root and dropping
+privileges afterwards — a root phase the image does not currently have at all.
+
 
 <!-- CONTAINER IMAGES -->
 ## Container images
