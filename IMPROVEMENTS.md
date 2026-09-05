@@ -36,31 +36,6 @@ The only thing the bot cannot do is decide by itself whether the emojis match �
 entire security property. It needs one input from a human, and a command is a perfectly good
 way to get it.
 
-### Sketch
-
-The pieces exist in `matrix-sdk` 0.18 (`matrix_sdk::encryption::verification`):
-
-```rust
-// 1. The admin starts the verification in their client. The bot receives
-//    m.key.verification.request, either as a to-device event or in the room.
-let request = client.encryption().get_verification_request(user_id, flow_id).await?;
-request.accept().await?;
-
-// 2. One side starts SAS; the bot can do it, or accept the one the client started.
-let Verification::SasV1(sas) = client.encryption().get_verification(user_id, flow_id).await? else { ... };
-sas.accept().await?;
-
-// 3. Once both sides have exchanged keys, the emojis are available.
-if sas.can_be_presented() {
-    let emojis = sas.emoji().unwrap();  // [Emoji; 7], each with .symbol and .description
-    // post them into the room
-}
-
-// 4. The admin compares them with what their client shows.
-//    !verify yes  -> sas.confirm().await?
-//    !verify no   -> sas.mismatch().await?
-```
-
 ### What to think about before building it
 
 - **Who may verify.** Only the configured admin, and only in a direct message — not in a
@@ -87,7 +62,7 @@ The hard part is not the interface. It is the login.
 
 ### How people could log in
 
-Four options, from "works today" to "do not do this".
+Two ways, neither of which puts a password anywhere near the bot.
 
 #### a) Matrix OpenID token — works with a plain Synapse, no server configuration
 
@@ -110,22 +85,10 @@ Step 3 is unauthenticated and needs no relationship with the homeserver whatsoev
 what makes this work without configuring anything on the Synapse side.
 
 The catch is step 2: the user has to be logged in with a Matrix client to obtain the token in
-the first place. For a standalone web page that means copy and paste, which nobody enjoys.
-Which leads to:
+the first place, and getting it out of that client and into the web interface is a manual
+step.
 
-#### b) A widget inside Element — the same mechanism, without the copy and paste
-
-A widget is a web page embedded in a Matrix room. Element hands it an OpenID token through the
-widget API — the same token as above, obtained for the user automatically. From the user's
-point of view there is no login at all: they open the bot's panel in the room and are already
-identified.
-
-Best user experience of the four, and it fits a room bot: the configuration lives where the
-bot lives. The cost is that the interface has to be registered as a widget in the room (an
-`im.vector.modular.widgets` state event, so it needs a power level), it has to speak the
-widget API, and outside Element the support varies.
-
-#### c) OIDC through Matrix Authentication Service — the future-proof one, if you run MAS
+#### b) OIDC through Matrix Authentication Service — the future-proof one, if you run MAS
 
 [Matrix Authentication Service](https://github.com/matrix-org/matrix-authentication-service) is
 a real OAuth 2.0 / OpenID Connect provider for Synapse, and the direction Matrix
@@ -136,18 +99,12 @@ ordinary authorization code flow against it and get back a verified Matrix user 
 The condition is in the first sentence: the deployment has to run MAS. A plain Synapse with
 local passwords does not have it. Worth designing for, not worth waiting for.
 
-#### d) Asking for the Matrix password in the bot's own form — no
-
-It would be the shortest path and it is the wrong one. It trains people to type their Matrix
-password into whatever asks for it, and it puts credentials for the whole account into a bot
-whose job is counting emojis. If a login form is unavoidable, it belongs to the homeserver,
-not here.
-
 ### Recommendation
 
-If this ever gets built: (b) as a widget, with (a) as the fallback for people who want to open
-the page outside Element, because both rest on the same token and the second one is then
-nearly free. (c) once MAS is common enough to assume.
+(a) is the one that works against any Synapse today, so it is where to start. (b) once MAS is
+common enough to assume — it is the same idea with a proper redirect instead of a manual step,
+and both end at the same place: a verified Matrix user id, and no password anywhere near this
+bot.
 
 ---
 
