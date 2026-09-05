@@ -295,6 +295,9 @@ The bot handles `SIGTERM` and `Ctrl-C`, so `docker stop` shuts it down cleanly.
 - `REACTION_LIMIT`, `REACTION_TIMESPAN` and `INITIAL_SOCIAL_CREDIT` are global, not per room.
 - `!list` shows at most 100 users.
 
+Ideas for closing these, with the analysis behind them, are collected in
+[`IMPROVEMENTS.md`](IMPROVEMENTS.md).
+
 
 <!-- DEVELOPMENT -->
 ## Development
