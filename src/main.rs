@@ -20,8 +20,13 @@ use std::time::Duration;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-// Still open: verify that a registered "emoji" really is one, and create the room data for
-// every member when the bot joins a room instead of only for users it has seen an event from.
+// Still open: device verification. The bot runs as an unverified session, so anybody who has
+// their client set to share keys only with verified sessions stays unreadable for it. The SDK
+// offers the emoji short auth string for this (`SasVerification::emoji()`), but it needs a
+// person on the other side to confirm the emojis, so it is a feature, not a setting.
+//
+// Also still open: create the room data for every member when the bot joins a room, instead
+// of only for users it has seen an event from.
 
 /// Log level defaults. Overridable via `RUST_LOG`, e.g.
 /// `RUST_LOG=matrix_social_credits=debug,matrix_sdk=info`.
