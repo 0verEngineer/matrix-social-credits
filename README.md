@@ -72,17 +72,19 @@ Matrix bot for a social credit system
 
 ### Which user the container runs as
 
-The image runs as a non-root user, uid `10001`, so the data directory has to be readable and
-writable by it. Otherwise the bot stops on the first start with
+The image runs as a non-root user, uid `10001`, so the data directory has to be writable by
+it. Otherwise the bot stops on the first start with
 `Error code 14: Unable to open the database file`.
 
-Either give the directory to that uid:
+Two ways round that. The difference between them is only who owns the files afterwards.
+
+Give the directory to the image's uid:
 
 ```sh
 sudo chown -R 10001:10001 ./data
 ```
 
-Or, if you would rather keep the directory as it is, tell the container to run as its owner:
+Or give the container your uid and leave the directory alone:
 
 ```yaml
 services:
@@ -90,12 +92,20 @@ services:
     user: "1000:1000"     # id -u : id -g of whoever owns ./data
 ```
 
-`user:` overrides the uid baked into the image, and any value works — the uid does not need to
-exist inside the container. Everything the bot writes then belongs to that user on the host.
+`user:` overrides the uid baked into the image, and any value works — the uid does not have to
+exist inside the container.
 
-There is deliberately no environment variable for this. Setting the uid is the container
-runtime's job, and doing it in the bot instead would mean starting as root and dropping
-privileges afterwards — a root phase the image does not currently have at all.
+With the second one everything the bot writes stays yours, so backups and a quick look with
+`sqlite3` need nothing special. With the first one the files belong to `10001`: they are mode
+`0644`, so you can still read and copy them, but changing or deleting them needs `sudo`, and
+`store/session.json` is `0600` and stays unreadable for you.
+
+There is deliberately no environment variable for the uid. Which user a container runs as is
+decided by the container runtime before the process starts, so the bot cannot read a variable
+and act on it. The way to do it anyway is to start as root, fix the ownership and drop
+privileges — that is what `PUID`/`PGID` does in linuxserver.io images. It works well, but it
+gives the container a root phase this image does not have at all, and `user:` reaches the same
+result without one.
 
 
 <!-- CONTAINER IMAGES -->
