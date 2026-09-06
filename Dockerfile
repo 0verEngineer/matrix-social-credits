@@ -35,7 +35,12 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Run as a normal user; the data volume is owned by it.
-RUN useradd --system --create-home --uid 10001 socialcredit \
+#
+# 1000:1000 because that is the first non-system account on nearly every host, so a bind
+# mounted ./data owned by whoever set the bot up already has the right owner and no chown is
+# needed. Where it does not fit, `user:` in the compose file overrides it.
+RUN groupadd --gid 1000 socialcredit \
+    && useradd --uid 1000 --gid 1000 --create-home socialcredit \
     && mkdir -p /data \
     && chown socialcredit:socialcredit /data
 

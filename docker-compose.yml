@@ -3,9 +3,9 @@ services:
     # Pinned on purpose, so an update is something you do rather than something that happens
     # to you. See the README for the other tags (latest, 0.1, edge, pr-<n>).
     image: 0verengineer/matrix-social-credits:0.1.0
-    # The image runs as uid 10001. Either chown ./data to it, or uncomment this and set it to
-    # whoever owns ./data -- any uid works, see the README.
-    # user: "1000:1000"
+    # The image runs as uid 1000, which is usually yours, so ./data needs no chown. If it
+    # belongs to somebody else, uncomment this and name that uid instead.
+    # user: "1234:1234"
     environment:
       # The initial social credit that a user has
       INITIAL_SOCIAL_CREDIT: 250

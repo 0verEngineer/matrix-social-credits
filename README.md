@@ -72,33 +72,22 @@ Matrix bot for a social credit system
 
 ### Which user the container runs as
 
-The image runs as a non-root user, uid `10001`, so the data directory has to be writable by
-it. Otherwise the bot stops on the first start with
-`Error code 14: Unable to open the database file`.
+The image runs as uid `1000`, not as root. That is the first non-system account on nearly
+every host, so a bind mounted `./data` created by whoever set the bot up usually has the right
+owner already and there is nothing to do.
 
-Two ways round that. The difference between them is only who owns the files afterwards.
-
-Give the directory to the image's uid:
-
-```sh
-sudo chown -R 10001:10001 ./data
-```
-
-Or give the container your uid and leave the directory alone:
+If the directory belongs to somebody else — a multi-user host, or a dedicated service account
+— point the container at that uid instead:
 
 ```yaml
 services:
   matrix-social-credit:
-    user: "1000:1000"     # id -u : id -g of whoever owns ./data
+    user: "1234:1234"     # id -u : id -g of whoever owns ./data
 ```
 
-`user:` overrides the uid baked into the image, and any value works — the uid does not have to
-exist inside the container.
-
-With the second one everything the bot writes stays yours, so backups and a quick look with
-`sqlite3` need nothing special. With the first one the files belong to `10001`: they are mode
-`0644`, so you can still read and copy them, but changing or deleting them needs `sudo`, and
-`store/session.json` is `0600` and stays unreadable for you.
+`user:` overrides the uid baked into the image, and any value works; the uid does not have to
+exist inside the container. Get it wrong and the bot stops on the first start with
+`Error code 14: Unable to open the database file`.
 
 There is deliberately no environment variable for the uid. Which user a container runs as is
 decided by the container runtime before the process starts, so the bot cannot read a variable

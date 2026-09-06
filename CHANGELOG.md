@@ -68,8 +68,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - matrix-sdk 0.6.2 → 0.18.0, Rust edition 2024, toolchain pinned in `rust-toolchain.toml`.
 - Bot answers are `m.notice` instead of `m.text`.
 - `ADMIN_USERNAME` also accepts a full Matrix id.
-- Multi-stage container image on `debian:trixie-slim` running as a non-root user, roughly
-  160 MB instead of about 1.5 GB.
+- Multi-stage container image on `debian:trixie-slim` running as uid 1000 instead of root,
+  roughly 160 MB instead of about 1.5 GB. An existing data directory belongs to `root` and
+  needs `chown` once; see the upgrade notes.
 - Version scheme: `0.0.9-alpha` → `0.1.0`. The `-alpha` suffix is gone; the leading `0.`
   already says that nothing here is stable. `Cargo.toml` is the single source of truth for
   the version, and CI refuses to publish an image whose tag disagrees with it.
