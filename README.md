@@ -33,10 +33,6 @@ Matrix bot for a social credit system
 
 
 ---
-<details>
-    <summary>Screenshots</summary>
-</details>
-
 
 <!-- TABLE OF CONTENTS -->
 <details>
@@ -48,6 +44,12 @@ Matrix bot for a social credit system
     <li>
       <a href="#setup">Setup</a>
     </li>
+    <li><a href="#container-images">Container images</a></li>
+    <li><a href="#configuration">Configuration</a></li>
+    <li><a href="#commands">Commands</a></li>
+    <li><a href="#operating-the-bot">Operating the bot</a></li>
+    <li><a href="#limitations">Limitations</a></li>
+    <li><a href="#development">Development</a></li>
     <li><a href="#license">License</a></li>
     <li><a href="#contact">Contact</a></li>
   </ol>
@@ -62,27 +64,352 @@ Matrix bot for a social credit system
 
 <!-- SETUP -->
 ## Setup
-- Use the example docker-compose.yml file to setup the bot.
-- The bot user can be created with Element / Element Web or any other Matrix client that supports registering a new user.
+- Use the example `docker-compose.yml` file to setup the bot.
+- The bot user can be created with Element / Element Web or any other Matrix client that
+  supports registering a new user.
+- Invite the bot into a room; it accepts invitations automatically.
+- The admin registers the emojis that change the score, see [Commands](#commands).
 
-### Environment Variables
-- INITIAL_SOCIAL_CREDIT: The initial social credit that a user has 
-- ADMIN_USERNAME: Username of the user that will be the admin of the social credit system, user needs to be on the MATRIX_HOMESERVER_URL
-- MATRIX_USERNAME: Username of the bot user
-- MATRIX_PASSWORD: Password of the bot user
-- MATRIX_HOMESERVER_URL: Homeserver url of the bot user for example https://matrix.org
-- REACTION_LIMIT: Limits the social credit change reactions that are possible within REACTION_TIMESPAN
-- REACTION_TIMESPAN: Timespan in minutes for the REACTION_LIMIT, like a cooldown
-- DB_PATH: Path to the database file
+### Which user the container runs as
 
-### Commands
-- !help: Shows the help message
-- !list: Lists all users and their social credit for the current room
-- !list-emoji: Lists all emojis that can be used to change the social credit for the current room
-- !register-emoji: To register an emoji
+The image runs as uid `1000`, not as root. That is the first non-system account on nearly
+every host, so a bind mounted `./data` created by whoever set the bot up usually has the right
+owner already and there is nothing to do.
+
+If the directory belongs to somebody else — a multi-user host, or a dedicated service account
+— point the container at that uid instead:
+
+```yaml
+services:
+  matrix-social-credit:
+    user: "1234:1234"     # id -u : id -g of whoever owns ./data
+```
+
+`user:` overrides the uid baked into the image, and any value works; the uid does not have to
+exist inside the container. Get it wrong and the bot stops on the first start with
+`Error code 14: Unable to open the database file`.
+
+There is deliberately no environment variable for the uid. Which user a container runs as is
+decided by the container runtime before the process starts, so the bot cannot read a variable
+and act on it. The way to do it anyway is to start as root, fix the ownership and drop
+privileges — that is what `PUID`/`PGID` does in linuxserver.io images. It works well, but it
+gives the container a root phase this image does not have at all, and `user:` reaches the same
+result without one.
+
+
+<!-- CONTAINER IMAGES -->
+## Container images
+
+Images are published to [Docker Hub](https://hub.docker.com/r/0verengineer/matrix-social-credits)
+for `linux/amd64` and `linux/arm64`. The version comes from `Cargo.toml`; nothing is tagged by
+hand any more.
+
+| Tag | Points at | Use it for |
+| --- | --- | --- |
+| `latest` | the newest release | you want updates without touching the compose file |
+| `0.1.0` | exactly that release | reproducible deployments, this is the recommended one |
+| `0.1` | the newest patch release of that minor version | bug fixes only, no new behaviour |
+| `0.2.0-rc.1` | a pre-release | testing a release candidate; never moves `latest` |
+| `edge` | the current state of `main` | testing what is merged but not released |
+| `pr-42` | the newest build of pull request 42 | reviewing or testing a pull request |
+
+From `1.0.0` on there is also a bare major tag (`1`). While the project is still `0.x` that
+tag is deliberately not published: a `0` that wanders across every `0.x` release would
+promise a stability that does not exist yet.
+
+`edge` and `pr-*` are development builds. They can contain half-finished work and, unlike a
+release, are not guaranteed to have a working database migration path.
+
+### Testing a pull request
+
+Every pull request from this repository gets its own image. The workflow summary of the
+`Publish` job prints the exact pull command, for example:
+
+```sh
+docker pull 0verengineer/matrix-social-credits:pr-42
+```
+
+There is also a `pr-42-<short sha>` tag that keeps pointing at one specific build, which is
+useful when the branch is force-pushed while you are testing. Both tags are deleted again when
+the pull request is closed.
+
+Pull requests from a fork are built but not pushed: GitHub deliberately withholds the registry
+credentials from them. Build such a branch locally instead:
+
+```sh
+docker build -t matrix-social-credits:test .
+```
+
+Or push it to a registry of your own, so a server can pull it:
+
+```sh
+docker buildx build -t your-registry/matrix-social-credits:test --push .
+```
+
+Add `--platform linux/amd64,linux/arm64` if you need both architectures; building for the
+other one locally needs `binfmt`/QEMU (`docker run --privileged --rm tonistiigi/binfmt
+--install all`) and is slow.
+
+### Making a release
+
+1. Bump `version` in `Cargo.toml` and run `cargo check` so `Cargo.lock` follows.
+2. Update `CHANGELOG.md`.
+3. Merge that into `main`.
+4. Tag the merge commit and push the tag:
+
+   ```sh
+   git tag v0.1.0
+   git push origin v0.1.0
+   ```
+
+The tag only triggers the release; the image tags are derived from `Cargo.toml`. If the two
+disagree, the workflow fails instead of publishing a mislabelled image. A version with a
+pre-release suffix (`0.2.0-rc.1`) is published under that exact tag only and moves neither
+`latest` nor `0.2`.
+
+### Repository secrets
+
+| Name | Kind | Needed for |
+| --- | --- | --- |
+| `DOCKERHUB_USERNAME` | **variable** | pushing any image |
+| `DOCKERHUB_TOKEN` | secret | pushing any image; needs the *Read, Write, Delete* scope so closed pull request tags can be cleaned up again |
+| `CODEBERG_TOKEN` | secret | the Codeberg mirror |
+
+`DOCKERHUB_USERNAME` has to be a **variable**, not a secret. The user name is the first half
+of the public image name, so nothing is gained by hiding it -- and it actively breaks the
+workflow: GitHub masks secret values everywhere and drops a job output that contains one
+instead of passing it on, so the tag list arrives empty at the publish job and every log line
+reads `***/matrix-social-credits`.
+
+Without them the workflow still builds both architectures and says in the job summary which
+one is missing. Note that a run only sees the secrets and variables that existed when it
+started -- adding one does not fix a run that is already going, you need a new run.
+
+
+<!-- CONFIGURATION -->
+## Configuration
+
+### Required environment variables
+| Variable | Description |
+| --- | --- |
+| `MATRIX_HOMESERVER_URL` | Homeserver URL of the bot user, for example `https://matrix.org`. Must include the scheme. |
+| `MATRIX_USERNAME` | Localpart of the bot user, for example `social-credit-system`. |
+| `MATRIX_PASSWORD` | Password of the bot user. Only used for the very first login, see [Sessions](#sessions). |
+| `ADMIN_USERNAME` | The user allowed to register emojis. Either a bare localpart (`alice`) or a full Matrix id (`@alice:example.org`). |
+| `INITIAL_SOCIAL_CREDIT` | Score a user starts with in a room. |
+| `REACTION_LIMIT` | How many score changing reactions a user may make within `REACTION_TIMESPAN`. |
+| `REACTION_TIMESPAN` | Length of that window, in minutes. |
+| `DB_PATH` | Path to the SQLite database file. |
+
+A full id has to be quoted in `docker-compose.yml` — `ADMIN_USERNAME: "@alice:example.org"`.
+An unquoted `@` is not valid YAML, and compose refuses the file with
+`found character that cannot start any token`.
+
+A bare `ADMIN_USERNAME` is resolved against the **server name of the bot's own Matrix id**,
+which the homeserver reports after login. That is not necessarily the host in
+`MATRIX_HOMESERVER_URL`: with `.well-known` delegation the URL can be
+`https://matrix.example.org` while user ids read `@alice:example.org`. Give the full Matrix id
+if you are unsure.
+
+### Optional environment variables
+| Variable | Default | Description |
+| --- | --- | --- |
+| `STORE_PATH` | `store` next to `DB_PATH` | Directory for the client state store and the saved session. |
+| `RUST_LOG` | `matrix_social_credits=info,matrix_sdk=warn,matrix_sdk_crypto=error` | Log filter, see [Logging](#logging). |
+| `HTTP_RETRY_LIMIT` | `10` | How often a single HTTP request is retried. |
+| `HTTP_MAX_RETRY_TIME_SECS` | `60` | Upper bound for the wait between two attempts of the same request. |
+| `LOGIN_RETRY_BUDGET_SECS` | `900` | How long the initial login keeps retrying before the bot gives up and exits. |
+| `EVENT_RETENTION_DAYS` | `30` | How long the deduplication markers in the `event` table are kept. |
+| `ACTIVITY_POINTS_PER_MESSAGE` | `1` | Social credit per message in the weekly payout. `0` stops counting messages. |
+| `ACTIVITY_POINTS_PER_IMAGE` | `5` | Social credit per image in the weekly payout. `0` stops counting images. |
+| `ACTIVITY_INACTIVITY_PENALTY` | `50` | Deducted from anybody who spends a whole period in a room without sending anything. `0` switches the penalty off. |
+| `ACTIVITY_PAYOUT_DAY` | `sunday` | Weekday of the payout, English name or three letter form. |
+| `ACTIVITY_PAYOUT_TIME` | `20:00` | Time of day of the payout, `HH:MM`. |
+| `ACTIVITY_PAYOUT_TIMEZONE` | `TZ`, else `UTC` | IANA time zone the day and time are read in, for example `Europe/Vienna`. |
+| `ACTIVITY_PAYOUT_MAX_ENTRIES` | `10` | How many people the payout message names before it summarises the rest. |
+
+Setting **all three** point values to `0` switches the weekly payout off completely: nothing is
+counted and no message is posted. The penalty counts as one of them, because working out who
+was idle needs the same counters as awarding points does.
+
+
+<!-- COMMANDS -->
+## Commands
+| Command | Who | Description |
+| --- | --- | --- |
+| `!help` | everyone | Show the command list. |
+| `!list` | everyone | Social credit scores of everyone currently in the room. |
+| `!list_emoji` | everyone | Registered emojis and their score change. |
+| `!register_emoji <emoji> <score>` | admin | Register an emoji, e.g. `!register_emoji 😑 -25`. |
+| `!unregister_emoji <emoji>` | admin | Remove a registered emoji again. |
+
+`-` and `_` are interchangeable in every command, and `!list_emoji`, `!list-emoji`,
+`!list_emojis` and `!list-emojis` all work.
 
 ### Usage
-- React with a registered emoji to a message to change the social credit of the user that sent the message
+React with a registered emoji to a message to change the score of the user who sent it.
+
+- You cannot change your own score.
+- Each message counts once per user; reacting a second time to the same message does nothing.
+- Variation selectors and skin tone modifiers are ignored, so 👍 and 👍🏽 are the same emoji as
+  far as the bot is concerned.
+
+
+### The weekly payout
+
+Besides reactions, the bot rewards taking part at all — and charges for not taking part. It
+counts what everybody sends and settles up once a week.
+
+| Counted as a message | Counted as an image | Not counted |
+| --- | --- | --- |
+| text, emotes (`/me`) | images | reactions, videos, files, audio, locations, notices |
+
+Commands to the bot do not count either — asking for `!list` twenty times is not an
+achievement. Editing a message does not count a second time.
+
+At the configured time the counters are converted into points and added to everybody's score.
+Anybody who is in the room, already has a score there and sent **nothing** at all loses
+`ACTIVITY_INACTIVITY_PENALTY` instead. Both are announced in the room in a single message:
+
+```
+🧧 Weekly Social Credit
+
+1. alice: +38 (23 messages, 3 images)
+2. bob: +21 (16 messages, 1 image)
+3. carol: +12 (12 messages)
+
+Idle: dave, erin — -50 each
+
+3 comrades earned 71 points, 2 idle comrades lost 100 points this period
+```
+
+Beyond `ACTIVITY_PAYOUT_MAX_ENTRIES` people the list stops naming names and adds a line like
+`… and 9 more comrades, +45 together`, so a busy room does not produce a wall of text every
+week. The idle are always a single line, however many of them there are.
+
+Details worth knowing:
+
+- **The period is "since the last payout", not a fixed seven days.** If the bot is down over
+  the payout time it settles up when it comes back, once, covering the whole time it was away
+  — including the penalty.
+- **Counting is per room.** Points are earned, and the penalty charged, in the room they
+  belong to, the same way scores work everywhere else in the bot.
+- **Only members are charged.** Somebody who left the room keeps their score untouched; it is
+  deliberately kept for them in case they come back. Somebody who is in the room but has never
+  sent anything at all has no score yet, and none is invented for them.
+- **A room the bot cannot read the member list for is skipped entirely** for that period,
+  awards included — charging people it cannot confirm are still there would eat exactly the
+  scores it keeps for those who left. That room's counters are kept rather than discarded, so
+  the next payout still covers them.
+- **The first period after switching the feature on does not charge the penalty.** It runs
+  from the moment the bot starts to the next payout, which can be a few hours; docking
+  everybody who did not happen to write in that window would be a poor introduction. Anything
+  shorter than half a week is treated that way.
+- **There is no floor.** A score can go negative, from the penalty as much as from a reaction.
+
+<!-- OPERATING -->
+## Operating the bot
+
+### Sessions
+After the first successful login the session is written to `STORE_PATH/session.json` with
+`0600` permissions and reused on every following start. This matters for two reasons: a fresh
+login creates a new device each time, and `/login` is one of the endpoints Synapse rate limits
+hardest. The password is only needed again if the session is revoked.
+
+The same directory holds the client state store, including the sync token, so a restart
+resumes where the previous run stopped instead of replaying the timeline.
+
+Back up `STORE_PATH` together with the database, or the bot logs in again and re-syncs.
+
+### Encrypted rooms
+The bot works in encrypted rooms. `STORE_PATH` also holds its crypto store, so the device and
+its room keys survive a restart -- which is what keeps the bot able to read messages sent
+while it was down, once it catches up.
+
+Two consequences worth knowing:
+
+- Delete `STORE_PATH` and the bot loses its device identity along with every room key it had.
+  It logs in again as a new device and can only read messages sent from that point on. The old
+  devices stay on the account until somebody removes them in a client.
+- The bot is an unverified session. That is fine by default, but see
+  [Limitations](#limitations) if members of your room restrict encryption to verified
+  sessions.
+
+### Rate limits and restarts
+Synapse answers with `429 M_LIMIT_EXCEEDED` fairly often, especially while the Matrix stack is
+coming back up. The bot handles this in three places:
+
+- Requests are retried according to `HTTP_RETRY_LIMIT` and `HTTP_MAX_RETRY_TIME_SECS`, and a
+  `retry_after` sent by the server is respected. Setting a retry limit is also what makes the
+  SDK retry plain connection failures at all, which is the case while the homeserver is down.
+- The login retries within `LOGIN_RETRY_BUDGET_SECS`. Permanent errors such as a wrong
+  password fail immediately instead of looping.
+- The sync loop survives transient errors. Only a permanent failure ends it.
+
+A single request can therefore take several minutes before it gives up. Run with
+`RUST_LOG=matrix_sdk=debug` to see the individual attempts.
+
+### Logging
+Logging goes to stdout via `tracing`. `RUST_LOG` takes the usual filter syntax:
+
+```
+RUST_LOG=matrix_social_credits=debug          # more detail from the bot
+RUST_LOG=matrix_social_credits=trace          # includes full event payloads
+RUST_LOG=matrix_social_credits=info,matrix_sdk=debug   # SDK request and retry detail
+RUST_LOG=matrix_sdk_crypto=warn                        # encryption, quiet by default
+```
+
+`trace` logs message contents. Do not leave it on in production.
+
+### Database
+SQLite, at `DB_PATH`, in WAL mode -- back up `*.db`, `*.db-wal` and `*.db-shm` together, or
+stop the bot first.
+
+The schema is versioned through `PRAGMA user_version` and migrated on start. Migrations run
+automatically and are idempotent, but take a backup before upgrading anyway.
+
+Scores of users who left a room are kept, so they are not reset if somebody rejoins. They are
+only hidden from `!list`.
+
+### Shutdown
+The bot handles `SIGTERM` and `Ctrl-C`, so `docker stop` shuts it down cleanly.
+
+
+<!-- LIMITATIONS -->
+## Limitations
+- **The bot's device is never verified.** It works in encrypted rooms, but it shows up as an
+  unverified session. Anybody who has "never send encrypted messages to unverified sessions"
+  switched on will not share room keys with it, so the bot cannot read *their* messages.
+- **Only messages sent after the bot's device existed can be read.** The bot cannot decrypt
+  anything from before it joined, and deleting `STORE_PATH` throws its identity away and
+  starts a new device.
+- There is exactly one admin, configured through `ADMIN_USERNAME`. There is no command to
+  promote anybody.
+- Removing a reaction does not undo the score change.
+- `REACTION_LIMIT`, `REACTION_TIMESPAN` and `INITIAL_SOCIAL_CREDIT` are global, not per room.
+- `!list` shows at most 100 users.
+
+Ideas for closing these, with the analysis behind them, are collected in
+[`IMPROVEMENTS.md`](IMPROVEMENTS.md).
+
+
+<!-- DEVELOPMENT -->
+## Development
+The toolchain is pinned in `rust-toolchain.toml`; `rustup` picks it up automatically.
+
+```
+cargo test
+cargo clippy --all-targets -- -D warnings
+cargo fmt --all --check
+```
+
+Building the container image:
+
+```
+docker build -t matrix-social-credits .
+docker buildx build --platform linux/amd64,linux/arm64 -t matrix-social-credits .
+```
+
 
 <!-- LICENSE -->
 ## License
@@ -96,7 +423,7 @@ Distributed under the GNU General Public License v3 See `LICENSE` for more infor
 
 Julian Hackinger - dev@hackinger.net
 
-Project Link: [https://github.com/0verEngineer/matrix-social-credit](https://github.com/0verEngineer/matrix-social-credits)
+Project Link: [https://github.com/0verEngineer/matrix-social-credits](https://github.com/0verEngineer/matrix-social-credits)
 
 
 
@@ -110,4 +437,4 @@ Project Link: [https://github.com/0verEngineer/matrix-social-credit](https://git
 [issues-shield]: https://img.shields.io/github/issues/0verEngineer/matrix-social-credits.svg?style=for-the-badge
 [issues-url]: https://github.com/0verEngineer/matrix-social-credits/issues
 [license-shield]: https://img.shields.io/github/license/0verEngineer/matrix-social-credits.svg?style=for-the-badge
-[license-url]: https://github.com/0verEngineer/matrix-social-credits/blob/master/LICENSE.txt
+[license-url]: https://github.com/0verEngineer/matrix-social-credits/blob/main/LICENSE

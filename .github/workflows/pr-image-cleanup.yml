@@ -1,0 +1,56 @@
+name: Clean up pull request images
+
+# Every pull request build leaves pr-<n> and pr-<n>-<sha> behind on Docker Hub. Without this
+# the public tag list slowly turns into a graveyard of closed pull requests.
+on:
+  pull_request:
+    types: [ closed ]
+
+jobs:
+  delete-tags:
+    name: Delete the pr-${{ github.event.pull_request.number }} tags
+    # Images from a fork were never pushed, and this event does not hand out the secrets for
+    # them either.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Delete the tags from Docker Hub
+        # This needs an access token with the "Read, Write, Delete" scope. With a weaker token
+        # the tags simply stay behind, which is not worth failing a run over.
+        continue-on-error: true
+        env:
+          IMAGE: 0verengineer/matrix-social-credits
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${DOCKERHUB_TOKEN:-}" ]; then
+            echo "No Docker Hub credentials configured, nothing to clean up."
+            exit 0
+          fi
+
+          jwt=$(curl -fsSL https://hub.docker.com/v2/users/login/ \
+                  -H 'Content-Type: application/json' \
+                  -d "$(jq -nc --arg u "$DOCKERHUB_USERNAME" --arg p "$DOCKERHUB_TOKEN" \
+                        '{username: $u, password: $p}')" \
+                | jq -r '.token')
+
+          # The name filter is a substring match, so pr-4 would also return pr-42. The regex
+          # below keeps only the tags that really belong to this pull request.
+          tags=$(curl -fsSL -H "Authorization: JWT $jwt" \
+                   "https://hub.docker.com/v2/repositories/$IMAGE/tags?page_size=100&name=pr-$PR_NUMBER" \
+                 | jq -r --arg n "$PR_NUMBER" '.results[].name | select(test("^pr-\($n)($|-)"))')
+
+          if [ -z "$tags" ]; then
+            echo "No tags left for pull request #$PR_NUMBER."
+            exit 0
+          fi
+
+          while IFS= read -r tag; do
+            echo "Deleting $IMAGE:$tag"
+            curl -fsSL -X DELETE -H "Authorization: JWT $jwt" \
+              "https://hub.docker.com/v2/repositories/$IMAGE/tags/$tag/"
+          done <<< "$tags"

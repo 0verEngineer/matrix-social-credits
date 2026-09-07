@@ -1,0 +1,345 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+    tags: [ "v*" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # Superseded pull request builds are pointless, a release build must never be cancelled.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Single place for the image name. It is also used to build the pull commands that end up
+  # in the job summary.
+  IMAGE: 0verengineer/matrix-social-credits
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # The toolchain comes from rust-toolchain.toml, so CI, Docker and a local checkout all
+      # build with the same compiler.
+      - name: Show toolchain
+        run: |
+          rustup show
+          rustc --version
+          cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --locked --verbose
+
+      - name: Build
+        run: cargo build --release --locked --verbose
+
+  meta:
+    name: Image metadata
+    runs-on: ubuntu-24.04
+
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tags: ${{ steps.meta.outputs.tags }}
+      primary_tag: ${{ steps.meta.outputs.primary_tag }}
+      push: ${{ steps.meta.outputs.push }}
+      created: ${{ steps.meta.outputs.created }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # Everything the image jobs need to know is decided here, once: which version we are
+      # building, which tags it gets and whether we are allowed to push at all.
+      - name: Work out the version and the image tags
+        id: meta
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+          HAS_TOKEN: ${{ secrets.DOCKERHUB_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+
+          # Cargo.toml is the single source of truth for the version. Nothing is ever typed
+          # into a docker tag by hand again; that is how 0.0.9-alpha happened.
+          version=$(awk -F'=' '
+            /^\[/ { section = $1 }
+            section == "[package]" && $1 ~ /^ *version *$/ {
+              gsub(/[" ]/, "", $2); print $2; exit
+            }' Cargo.toml)
+
+          if [ -z "$version" ]; then
+            echo "::error::Could not read the package version from Cargo.toml"
+            exit 1
+          fi
+          echo "Version from Cargo.toml: $version"
+
+          sha=${PR_HEAD_SHA:-$GITHUB_SHA}
+          short_sha=${sha:0:7}
+
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            # The tag only triggers the release, it does not define the version. If the two
+            # disagree, somebody forgot to bump Cargo.toml.
+            if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+              echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml (expected v$version)"
+              exit 1
+            fi
+
+            tags="$IMAGE:$version"
+
+            # A pre-release such as 0.2.0-rc.1 gets its exact tag and nothing else: it must
+            # not move latest or the floating major/minor tags.
+            if [[ "$version" =~ ^([0-9]+)\.([0-9]+)\.[0-9]+$ ]]; then
+              major=${BASH_REMATCH[1]}
+              minor=${BASH_REMATCH[2]}
+              tags="$tags"$'\n'"$IMAGE:$major.$minor"
+              # A bare "0" tag would promise nothing useful while the project is still 0.x.
+              if [ "$major" != "0" ]; then
+                tags="$tags"$'\n'"$IMAGE:$major"
+              fi
+              tags="$tags"$'\n'"$IMAGE:latest"
+            fi
+          elif [ "$EVENT" = "pull_request" ]; then
+            # pr-42 always points at the newest build of that pull request, pr-42-<sha> stays
+            # fixed so a specific state can be pulled again later.
+            tags="$IMAGE:pr-$PR_NUMBER"$'\n'"$IMAGE:pr-$PR_NUMBER-$short_sha"
+          elif [ "$GITHUB_REF_NAME" = "main" ]; then
+            tags="$IMAGE:edge"$'\n'"$IMAGE:edge-$short_sha"
+          else
+            # Manual run on some other branch.
+            branch=$(printf '%s' "$GITHUB_REF_NAME" | tr -c 'a-zA-Z0-9_.-' '-' | cut -c1-100)
+            tags="$IMAGE:branch-$branch"$'\n'"$IMAGE:branch-$branch-$short_sha"
+          fi
+
+          # Name what is actually missing. "DOCKERHUB_USERNAME and DOCKERHUB_TOKEN are not
+          # set" sends you looking at both when only one of them is the problem.
+          missing=""
+          if [ -z "${DOCKERHUB_USERNAME:-}" ]; then
+            missing="DOCKERHUB_USERNAME"
+          fi
+          if [ "$HAS_TOKEN" != "true" ]; then
+            missing="${missing:+$missing and }DOCKERHUB_TOKEN"
+          fi
+
+          push=true
+          reason=""
+          # Only set when the missing credentials are the actual reason: on a fork pull
+          # request they are missing too, but pointing at the settings page would be wrong.
+          credentials_hint=""
+          if [ "$EVENT" = "pull_request" ] && [ "$PR_HEAD_REPO" != "$GITHUB_REPOSITORY" ]; then
+            # Checked before the credentials on purpose: a fork pull request is not given the
+            # secrets at all, so it would otherwise be reported as a misconfigured repository.
+            push=false
+            reason="this pull request comes from the fork $PR_HEAD_REPO"
+          elif [ -n "$missing" ]; then
+            push=false
+            reason="$missing is not available to this workflow run"
+            credentials_hint="yes"
+          fi
+
+          primary_tag=$(printf '%s' "$tags" | head -n1)
+
+          {
+            echo "version=$version"
+            echo "push=$push"
+            echo "primary_tag=$primary_tag"
+            echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "tags<<TAGS_EOF"
+            echo "$tags"
+            echo "TAGS_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Tags:"
+          echo "$tags"
+
+          if [ "$push" = "false" ]; then
+            echo "::warning::The image is built but not pushed, because $reason"
+            {
+              echo "## Image not pushed"
+              echo
+              echo "The image is built for \`linux/amd64\` and \`linux/arm64\`, but not pushed,"
+              echo "because $reason."
+              if [ -n "$credentials_hint" ]; then
+                echo
+                echo "Set it under **Settings → Secrets and variables → Actions**:"
+                echo "\`DOCKERHUB_TOKEN\` as a secret, \`DOCKERHUB_USERNAME\` as a *variable*."
+                echo "A value added *after* this run started does not apply to it -- start a new run."
+              fi
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  build:
+    name: Image ${{ matrix.platform }}
+    needs: [ test, meta ]
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          # Native arm64 runners, free for public repositories. Building this dependency tree
+          # for arm64 through QEMU on an amd64 runner takes well over half an hour.
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Name this platform
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: echo "PLATFORM_PAIR=${PLATFORM//\//-}" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        if: needs.meta.outputs.push == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Each runner pushes its own single-arch image without a tag; the publish job below
+      # joins the two digests into one multi-arch manifest and puts the tags on that.
+      - name: Build and push by digest
+        id: build
+        if: needs.meta.outputs.push == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          labels: |
+            org.opencontainers.image.title=matrix-social-credits
+            org.opencontainers.image.description=A social credit system bot for Matrix
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.meta.outputs.version }}
+            org.opencontainers.image.created=${{ needs.meta.outputs.created }}
+            org.opencontainers.image.licenses=GPL-3.0-only
+          # Attestations would add extra manifests to the push, which the manifest merge
+          # below would then have to filter back out.
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=${{ env.PLATFORM_PAIR }}
+          cache-to: type=gha,mode=max,scope=${{ env.PLATFORM_PAIR }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Build without pushing
+        if: needs.meta.outputs.push != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          push: false
+          cache-from: type=gha,scope=${{ env.PLATFORM_PAIR }}
+          cache-to: type=gha,mode=max,scope=${{ env.PLATFORM_PAIR }}
+
+      - name: Export the digest
+        if: needs.meta.outputs.push == 'true'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+
+      - uses: actions/upload-artifact@v4
+        if: needs.meta.outputs.push == 'true'
+        with:
+          name: digests-${{ env.PLATFORM_PAIR }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish
+    needs: [ meta, build ]
+    if: needs.meta.outputs.push == 'true'
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Create the multi-arch manifest
+        working-directory: /tmp/digests
+        env:
+          TAGS: ${{ needs.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+
+          tag_args=()
+          while IFS= read -r tag; do
+            if [ -n "$tag" ]; then tag_args+=(--tag "$tag"); fi
+          done <<< "$TAGS"
+
+          digest_args=()
+          for digest in *; do
+            digest_args+=("$IMAGE@sha256:$digest")
+          done
+
+          docker buildx imagetools create "${tag_args[@]}" "${digest_args[@]}"
+
+      - name: Inspect the published manifest
+        env:
+          PRIMARY_TAG: ${{ needs.meta.outputs.primary_tag }}
+        run: docker buildx imagetools inspect "$PRIMARY_TAG"
+
+      - name: Write the summary
+        env:
+          TAGS: ${{ needs.meta.outputs.tags }}
+          PRIMARY_TAG: ${{ needs.meta.outputs.primary_tag }}
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Image published"
+            echo
+            echo "Version \`$VERSION\` (from \`Cargo.toml\`) for \`linux/amd64\` and \`linux/arm64\`."
+            echo
+            echo '```sh'
+            echo "docker pull $PRIMARY_TAG"
+            echo '```'
+            echo
+            echo "In a compose file:"
+            echo
+            echo '```yaml'
+            echo "    image: $PRIMARY_TAG"
+            echo '```'
+            echo
+            echo "| All tags pushed by this run |"
+            echo "| --- |"
+            while IFS= read -r tag; do
+              if [ -n "$tag" ]; then echo "| \`$tag\` |"; fi
+            done <<< "$TAGS"
+          } | tee -a "$GITHUB_STEP_SUMMARY"

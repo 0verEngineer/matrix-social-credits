@@ -1,5 +1,8 @@
-pub mod user;
+pub mod activity;
+pub mod bot_state;
 pub mod emoji;
 pub mod event;
-pub mod user_room_data;
+pub mod migrations;
+pub mod user;
 pub(crate) mod user_reaction;
+pub mod user_room_data;

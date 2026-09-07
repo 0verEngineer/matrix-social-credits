@@ -1,47 +1,122 @@
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
 use matrix_sdk::Client;
-use matrix_sdk::room::Room;
+use matrix_sdk::ruma::OwnedServerName;
 use matrix_sdk::ruma::events::room::member::StrippedRoomMemberEvent;
+use matrix_sdk::{Room, RoomState};
+use tracing::{debug, error, info, warn};
 
-/// Autojoin // todo check if it works if kicked once and reinvited
-pub async fn on_stripped_state_member(event: StrippedRoomMemberEvent,
-                                      client: Client,
-                                      room: Room,
-) {
-    if client.user_id().is_none() { return; }
-    if event.state_key != client.user_id().unwrap() { return; }
+use crate::utils::matrix_util::{Retryable, classify_error};
 
-    match room {
-        Room::Joined(_) => {
-            println!("Already joined room {}", room.room_id());
-        },
-        Room::Invited(_) => {
-            if room.name().is_none() { return; }
-            let room_name = room.name().unwrap();
-            println!("Invited into room {}, id: {}", room_name, room.room_id());
-            tokio::spawn(async move {
-                let mut delay = 2;
+/// Smallest wait between two join attempts.
+const MIN_JOIN_DELAY: Duration = Duration::from_secs(2);
+/// Largest wait between two join attempts.
+const MAX_JOIN_DELAY: Duration = Duration::from_secs(300);
+/// Total time spent retrying a single invitation before giving up.
+const JOIN_RETRY_BUDGET: Duration = Duration::from_secs(3600);
 
-                while let Err(err) = client.join_room_by_id(room.room_id()).await {
-                    // retry autojoin due to synapse sending invites, before the
-                    // invited user can join for more information see
-                    // https://github.com/matrix-org/synapse/issues/4345
-                    eprintln!("Failed to join room {}, id: {} ({err:?}), retrying in {delay}s", room_name, room.room_id());
-
-                    tokio::time::sleep(Duration::from_secs(delay)).await;
-                    delay *= 2;
-
-                    if delay > 3600 {
-                        eprintln!("Can't join room {}, id: {} ({err:?})", room_name, room.room_id());
-                        break;
-                    }
-                }
-                println!("Successfully joined room {}, id: {}", room_name, room.room_id());
-            });
-        },
-        Room::Left(_) => {
-            if room.name().is_none() { return; }
-            println!("Left room {}, id: {}", room.name().unwrap(), room.room_id());
-        },
+/// Accept invitations automatically.
+pub async fn on_stripped_state_member(event: StrippedRoomMemberEvent, client: Client, room: Room) {
+    let Some(own_user_id) = client.user_id() else {
+        return;
+    };
+    if event.state_key != own_user_id {
+        return;
     }
+
+    match room.state() {
+        RoomState::Joined => {
+            debug!(room_id = %room.room_id(), "Already joined room");
+        }
+        RoomState::Invited | RoomState::Knocked => {
+            // The room name is only used for logging. Requiring one here meant rooms without
+            // an m.room.name -- direct messages, freshly created rooms, many bridged rooms --
+            // were never joined at all.
+            let room_name = room.name().unwrap_or_else(|| "<unnamed>".to_owned());
+            info!(
+                room_name,
+                room_id = %room.room_id(),
+                inviter = %event.sender,
+                "Invited into room"
+            );
+            // The inviter's server is passed along as a via hint. Joining by room id alone
+            // only works for rooms the homeserver already knows; for anything federated it
+            // answers "Can't join remote room because no servers that are in the room have
+            // been provided", and whoever sent the invite is by definition in the room.
+            let via = vec![event.sender.server_name().to_owned()];
+            tokio::spawn(join_with_retry(client, room, room_name, via));
+        }
+        RoomState::Left | RoomState::Banned => {
+            debug!(
+                room_name = room.name().unwrap_or_else(|| "<unnamed>".to_owned()),
+                room_id = %room.room_id(),
+                state = ?room.state(),
+                "No longer a member of the room"
+            );
+        }
+    }
+}
+
+/// Keep trying to join until it works, the error turns out to be permanent, or the budget is
+/// used up.
+///
+/// Synapse can send the invite before the invited user is allowed to act on it, see
+/// <https://github.com/matrix-org/synapse/issues/4345>.
+async fn join_with_retry(client: Client, room: Room, room_name: String, via: Vec<OwnedServerName>) {
+    let deadline = SystemTime::now() + JOIN_RETRY_BUDGET;
+    let mut delay = MIN_JOIN_DELAY;
+
+    loop {
+        let error = match client
+            .join_room_by_id_or_alias(room.room_id().into(), &via)
+            .await
+        {
+            Ok(_) => {
+                info!(room_name, room_id = %room.room_id(), "Successfully joined room");
+                return;
+            }
+            Err(error) => error,
+        };
+
+        // A 403 ("not invited", "banned from this room") will keep failing no matter how long
+        // we wait. Previously every error was retried the same way for up to an hour.
+        let wait = match classify_error(&error) {
+            Retryable::No => {
+                error!(room_name, room_id = %room.room_id(), %error, "Cannot join room, giving up");
+                return;
+            }
+            Retryable::Yes { retry_after } => retry_after.unwrap_or(delay).min(MAX_JOIN_DELAY),
+        };
+
+        if SystemTime::now() + wait > deadline {
+            error!(
+                room_name,
+                room_id = %room.room_id(),
+                %error,
+                budget_secs = JOIN_RETRY_BUDGET.as_secs(),
+                "Still cannot join room after the retry budget, giving up"
+            );
+            return;
+        }
+
+        warn!(
+            room_name,
+            room_id = %room.room_id(),
+            wait_secs = wait.as_secs(),
+            %error,
+            "Failed to join room, retrying"
+        );
+        tokio::time::sleep(wait).await;
+
+        // Jitter keeps several invitations arriving at once from retrying in lockstep.
+        delay = (delay * 2 + jitter()).min(MAX_JOIN_DELAY);
+    }
+}
+
+fn jitter() -> Duration {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
+    Duration::from_millis(u64::from(nanos % 1_000))
 }
