@@ -45,7 +45,7 @@ services:
       # ACTIVITY_PAYOUT_MAX_ENTRIES: 10
 
       # Optional, shown with their defaults:
-      # RUST_LOG: matrix_social_credits=info,matrix_sdk=warn
+      # RUST_LOG: matrix_social_credits=info,matrix_sdk=warn,matrix_sdk_crypto=error
       # HTTP_RETRY_LIMIT: 10
       # HTTP_MAX_RETRY_TIME_SECS: 60
       # LOGIN_RETRY_BUDGET_SECS: 900

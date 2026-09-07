@@ -27,7 +27,14 @@ use tracing_subscriber::EnvFilter;
 ///
 /// The SDK is kept at `warn` on purpose: its `info` output is very chatty, but its warnings
 /// carry the rate limit and retry diagnostics we care about.
-const DEFAULT_LOG_FILTER: &str = "matrix_social_credits=info,matrix_sdk=warn";
+///
+/// `matrix_sdk_crypto` is a separate crate and needs its own entry. It is held at `error`
+/// because two of its warnings fire constantly and neither is actionable here: "Failed to
+/// decrypt a room event" for every message from before this device existed, and "Trying to
+/// backup room keys but no backup key was found" because the bot has no server side key
+/// backup. Set `RUST_LOG` to bring them back when debugging encryption.
+const DEFAULT_LOG_FILTER: &str =
+    "matrix_social_credits=info,matrix_sdk=warn,matrix_sdk_crypto=error";
 
 /// How many times the SDK may retry a single HTTP request.
 ///

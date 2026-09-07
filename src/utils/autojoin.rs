@@ -1,6 +1,7 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use matrix_sdk::Client;
+use matrix_sdk::ruma::OwnedServerName;
 use matrix_sdk::ruma::events::room::member::StrippedRoomMemberEvent;
 use matrix_sdk::{Room, RoomState};
 use tracing::{debug, error, info, warn};
@@ -32,8 +33,18 @@ pub async fn on_stripped_state_member(event: StrippedRoomMemberEvent, client: Cl
             // an m.room.name -- direct messages, freshly created rooms, many bridged rooms --
             // were never joined at all.
             let room_name = room.name().unwrap_or_else(|| "<unnamed>".to_owned());
-            info!(room_name, room_id = %room.room_id(), "Invited into room");
-            tokio::spawn(join_with_retry(client, room, room_name));
+            info!(
+                room_name,
+                room_id = %room.room_id(),
+                inviter = %event.sender,
+                "Invited into room"
+            );
+            // The inviter's server is passed along as a via hint. Joining by room id alone
+            // only works for rooms the homeserver already knows; for anything federated it
+            // answers "Can't join remote room because no servers that are in the room have
+            // been provided", and whoever sent the invite is by definition in the room.
+            let via = vec![event.sender.server_name().to_owned()];
+            tokio::spawn(join_with_retry(client, room, room_name, via));
         }
         RoomState::Left | RoomState::Banned => {
             debug!(
@@ -51,12 +62,15 @@ pub async fn on_stripped_state_member(event: StrippedRoomMemberEvent, client: Cl
 ///
 /// Synapse can send the invite before the invited user is allowed to act on it, see
 /// <https://github.com/matrix-org/synapse/issues/4345>.
-async fn join_with_retry(client: Client, room: Room, room_name: String) {
+async fn join_with_retry(client: Client, room: Room, room_name: String, via: Vec<OwnedServerName>) {
     let deadline = SystemTime::now() + JOIN_RETRY_BUDGET;
     let mut delay = MIN_JOIN_DELAY;
 
     loop {
-        let error = match client.join_room_by_id(room.room_id()).await {
+        let error = match client
+            .join_room_by_id_or_alias(room.room_id().into(), &via)
+            .await
+        {
             Ok(_) => {
                 info!(room_name, room_id = %room.room_id(), "Successfully joined room");
                 return;

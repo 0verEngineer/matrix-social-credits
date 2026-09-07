@@ -215,7 +215,7 @@ if you are unsure.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `STORE_PATH` | `store` next to `DB_PATH` | Directory for the client state store and the saved session. |
-| `RUST_LOG` | `matrix_social_credits=info,matrix_sdk=warn` | Log filter, see [Logging](#logging). |
+| `RUST_LOG` | `matrix_social_credits=info,matrix_sdk=warn,matrix_sdk_crypto=error` | Log filter, see [Logging](#logging). |
 | `HTTP_RETRY_LIMIT` | `10` | How often a single HTTP request is retried. |
 | `HTTP_MAX_RETRY_TIME_SECS` | `60` | Upper bound for the wait between two attempts of the same request. |
 | `LOGIN_RETRY_BUDGET_SECS` | `900` | How long the initial login keeps retrying before the bot gives up and exits. |
@@ -356,6 +356,7 @@ Logging goes to stdout via `tracing`. `RUST_LOG` takes the usual filter syntax:
 RUST_LOG=matrix_social_credits=debug          # more detail from the bot
 RUST_LOG=matrix_social_credits=trace          # includes full event payloads
 RUST_LOG=matrix_social_credits=info,matrix_sdk=debug   # SDK request and retry detail
+RUST_LOG=matrix_sdk_crypto=warn                        # encryption, quiet by default
 ```
 
 `trace` logs message contents. Do not leave it on in production.

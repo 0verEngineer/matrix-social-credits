@@ -1,6 +1,6 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use matrix_sdk::ruma::api::error::{ErrorKind, RetryAfter};
+use matrix_sdk::ruma::api::error::{ErrorBody, ErrorKind, RetryAfter};
 use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
 use matrix_sdk::{Client, Error, Room};
 use tracing::{error, info, warn};
@@ -56,8 +56,8 @@ pub fn classify_error(error: &Error) -> Retryable {
         // status code: 429 and 5xx are transient, the rest is not.
         _ => match error.as_client_api_error() {
             Some(api_error) => {
-                let status = api_error.status_code.as_u16();
-                if status == 429 || (500..600).contains(&status) {
+                let from_homeserver = !matches!(api_error.body, ErrorBody::NotJson { .. });
+                if retry_by_status(api_error.status_code.as_u16(), from_homeserver) {
                     Retryable::Yes { retry_after: None }
                 } else {
                     Retryable::No
@@ -69,6 +69,21 @@ pub fn classify_error(error: &Error) -> Retryable {
             None => Retryable::Yes { retry_after: None },
         },
     }
+}
+
+/// Whether an HTTP failure without a recognised Matrix error kind is worth another attempt.
+///
+/// `from_homeserver` is false when the response body was not a Matrix error at all. That is
+/// the tell that something in front of the homeserver answered: a reverse proxy that is still
+/// starting replies `404 page not found` in plain text, which clears up by itself. Treating
+/// that as permanent turns a few seconds of proxy startup into a crash loop -- seen in
+/// production, three restarts before the proxy was ready.
+fn retry_by_status(status: u16, from_homeserver: bool) -> bool {
+    if !from_homeserver {
+        return true;
+    }
+
+    status == 429 || (500..600).contains(&status)
 }
 
 /// Exponential backoff with jitter, capped at [`MAX_BACKOFF`].
@@ -217,4 +232,36 @@ pub fn log_retry_configuration(retry_limit: usize, max_retry_time: Duration) {
         max_retry_time_secs = max_retry_time.as_secs(),
         "HTTP retry configuration"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::retry_by_status;
+
+    #[test]
+    fn rate_limits_and_server_errors_are_retried() {
+        assert!(retry_by_status(429, true));
+        assert!(retry_by_status(500, true));
+        assert!(retry_by_status(502, true));
+        assert!(retry_by_status(503, true));
+    }
+
+    #[test]
+    fn a_real_matrix_error_is_taken_at_face_value() {
+        assert!(!retry_by_status(400, true));
+        assert!(!retry_by_status(401, true));
+        assert!(!retry_by_status(403, true));
+        // The homeserver saying "no such endpoint" will keep saying it.
+        assert!(!retry_by_status(404, true));
+    }
+
+    /// A body that is not a Matrix error means the homeserver never saw the request. Seen in
+    /// production as `404 page not found` in plain text from a reverse proxy that was still
+    /// coming up -- three crash-restarts before it was ready.
+    #[test]
+    fn anything_that_did_not_come_from_the_homeserver_is_retried() {
+        assert!(retry_by_status(404, false));
+        assert!(retry_by_status(400, false));
+        assert!(retry_by_status(502, false));
+    }
 }
