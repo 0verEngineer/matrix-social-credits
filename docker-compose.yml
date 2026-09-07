@@ -11,7 +11,10 @@ services:
       INITIAL_SOCIAL_CREDIT: 250
       # Username of the user that will be the admin of the social credit system.
       # A bare localpart is resolved against the bot's own server name; a full user id
-      # (@name:server) is accepted as well.
+      # is accepted as well, but it has to be quoted -- "@" cannot start an unquoted
+      # value in YAML, and compose fails with "found character that cannot start any
+      # token" before it ever reaches the bot:
+      #   ADMIN_USERNAME: "@alice:example.org"
       ADMIN_USERNAME: <username>
       # Username of the bot user
       MATRIX_USERNAME: social-credit-system

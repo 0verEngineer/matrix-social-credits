@@ -201,6 +201,10 @@ started -- adding one does not fix a run that is already going, you need a new r
 | `REACTION_TIMESPAN` | Length of that window, in minutes. |
 | `DB_PATH` | Path to the SQLite database file. |
 
+A full id has to be quoted in `docker-compose.yml` — `ADMIN_USERNAME: "@alice:example.org"`.
+An unquoted `@` is not valid YAML, and compose refuses the file with
+`found character that cannot start any token`.
+
 A bare `ADMIN_USERNAME` is resolved against the **server name of the bot's own Matrix id**,
 which the homeserver reports after login. That is not necessarily the host in
 `MATRIX_HOMESERVER_URL`: with `.well-known` delegation the URL can be
