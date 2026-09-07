@@ -1,6 +1,6 @@
 use crate::data::emoji::find_all_emoji_for_room_in_db;
 use crate::data::user::HtmlAndTextAnswer;
-use crate::utils::message::escape_html;
+use crate::utils::message::{escape_html, heading};
 use matrix_sdk::Room;
 use rusqlite::Connection;
 use std::sync::{Arc, Mutex};
@@ -77,7 +77,11 @@ pub fn get_emoji_list_answer(conn: &Arc<Mutex<Connection>>, room: &Room) -> Html
 
     HtmlAndTextAnswer {
         text: format!("Registered Emojis: {}", text_entries.join(", ")),
-        html: format!("<h3>Registered Emojis:</h3>{}", html_entries.join("<br>")),
+        html: format!(
+            "{}{}",
+            heading("Registered Emojis:"),
+            html_entries.join("<br>")
+        ),
     }
 }
 

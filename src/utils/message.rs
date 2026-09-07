@@ -27,6 +27,15 @@ pub fn escape_html(input: &str) -> String {
     escaped
 }
 
+/// The first line of a multi line answer, followed by an explicit break.
+///
+/// Not `<h3>`: clients disagree about whether a heading inside a message is a block of its
+/// own. Element renders it inline, so `<h3>Social Credit Scores:</h3>1. alice: 12345` came
+/// out as one run-on line. `<b>` plus `<br>` looks the same and behaves the same everywhere.
+pub fn heading(text: &str) -> String {
+    format!("<b>{}</b><br>", escape_html(text))
+}
+
 /// A formatted bot answer.
 ///
 /// `m.notice` rather than `m.text`: that is the convention for automated messages, it keeps
@@ -42,7 +51,7 @@ pub fn notice_plain(plain: impl Into<String>) -> RoomMessageEventContent {
 
 #[cfg(test)]
 mod tests {
-    use super::escape_html;
+    use super::{escape_html, heading};
 
     #[test]
     fn escapes_the_markup_characters() {
@@ -58,5 +67,18 @@ mod tests {
     #[test]
     fn escapes_a_registered_value_containing_markup() {
         assert_eq!(escape_html("<img src=x>"), "&lt;img src=x&gt;");
+    }
+
+    /// The break is the point of it: without one the first entry ends up on the same line as
+    /// the heading.
+    #[test]
+    fn a_heading_ends_in_a_break() {
+        assert_eq!(heading("Commands:"), "<b>Commands:</b><br>");
+        assert!(heading("anything").ends_with("<br>"));
+    }
+
+    #[test]
+    fn a_heading_escapes_its_text() {
+        assert_eq!(heading("<b>x</b>"), "<b>&lt;b&gt;x&lt;/b&gt;</b><br>");
     }
 }

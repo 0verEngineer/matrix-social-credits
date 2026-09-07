@@ -5,7 +5,7 @@ use crate::data::user::{User, UserType};
 use crate::data::user_room_data::add_social_credit;
 use crate::utils::emoji_util::{get_emoji_list_answer, normalize_emoji};
 use crate::utils::matrix_util::send_message;
-use crate::utils::message::{escape_html, notice_html, notice_plain};
+use crate::utils::message::{escape_html, heading, notice_html, notice_plain};
 use crate::utils::user_util::{compare_user, get_user_list_answer, setup_user};
 use matrix_sdk::ruma::events;
 use matrix_sdk::ruma::events::room::message::{MessageType, Relation};
@@ -418,7 +418,8 @@ impl EventHandler {
             .join("\n");
 
         let html = format!(
-            "<h3>Commands:</h3>{}",
+            "{}{}",
+            heading("Commands:"),
             commands
                 .iter()
                 .map(|(usage, description)| format!(

@@ -19,7 +19,7 @@ use crate::data::bot_state::{LAST_PAYOUT_AT, get_timestamp, set_timestamp};
 use crate::data::user::HtmlAndTextAnswer;
 use crate::data::user_room_data::{RoomUser, add_social_credit_on, users_with_room_data};
 use crate::utils::matrix_util::send_message;
-use crate::utils::message::{escape_html, notice_html};
+use crate::utils::message::{escape_html, heading, notice_html};
 use crate::utils::schedule::PayoutSchedule;
 
 /// How often the task looks at the clock.
@@ -434,10 +434,10 @@ pub fn format_payout(payout: &RoomPayout, max_entries: usize) -> HtmlAndTextAnsw
         ));
     }
 
-    // `<h3>` is a block of its own, so it needs no break after it; the paragraph breaks are
-    // doubled to match the blank lines of the plaintext body.
+    // The paragraph breaks are doubled to match the blank lines of the plaintext body.
     let mut html = format!(
-        "<h3>🧧 Weekly Social Credit</h3>{}",
+        "{}{}",
+        heading("🧧 Weekly Social Credit"),
         entry_lines.join("<br>")
     );
 
@@ -1132,6 +1132,21 @@ mod tests {
     }
 
     /// Names come from Matrix and are not trustworthy markup.
+    /// Element renders a heading inline, so the break has to be explicit -- otherwise the
+    /// first entry lands on the same line as the title.
+    #[test]
+    fn the_first_entry_starts_on_its_own_line() {
+        let answer = format_payout(&earned(vec![entry("alice", 3, 3, 0)]), 10);
+
+        assert!(
+            answer
+                .html
+                .starts_with("<b>🧧 Weekly Social Credit</b><br>1. "),
+            "unexpected start: {}",
+            &answer.html[..60.min(answer.html.len())]
+        );
+    }
+
     #[test]
     fn escapes_names_in_the_html_body() {
         let answer = format_payout(&earned(vec![entry("<b>ovi</b>", 5, 5, 0)]), 10);

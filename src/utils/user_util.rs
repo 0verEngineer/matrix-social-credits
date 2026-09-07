@@ -5,7 +5,7 @@ use crate::data::user::{
 use crate::data::user_room_data::{
     UserRoomData, find_user_room_data_by_user_id_and_room_id, insert_user_room_data,
 };
-use crate::utils::message::escape_html;
+use crate::utils::message::{escape_html, heading};
 use matrix_sdk::ruma::{OwnedUserId, ServerName, UserId};
 use matrix_sdk::{Room, RoomMemberships};
 use rusqlite::Connection;
@@ -248,9 +248,8 @@ pub async fn get_user_list_answer(
             text_entries.join("\n")
         ),
         html: format!(
-            "<h3>Social Credit Scores{}{}:</h3>{}",
-            escape_html(note),
-            escape_html(&cut_note),
+            "{}{}",
+            heading(&format!("Social Credit Scores{note}{cut_note}:")),
             html_entries.join("<br>")
         ),
     }
