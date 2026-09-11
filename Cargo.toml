@@ -20,6 +20,9 @@ matrix-sdk = { version = "0.18.0", default-features = false, features = [
     "bundled-sqlite",
     "e2e-encryption",
 ] }
+# Only for the `CryptoStore` trait, which matrix-sdk does not re-export. The bot reads the
+# device id out of the crypto store before it logs in, see `SessionStore::stored_device_id`.
+matrix-sdk-crypto = { version = "0.18.0", default-features = false }
 anyhow = "1.0.104"
 # For the weekly payout schedule. chrono-tz carries the IANA database in the binary, so the
 # configured time zone works without the image having to ship tzdata.
@@ -31,3 +34,6 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+
+[dev-dependencies]
+tempfile = "3"

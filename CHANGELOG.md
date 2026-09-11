@@ -35,6 +35,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   it did not count towards the cooldown, and the same message could be scored twice.
 - `Dockerfile` is buildable from a fresh clone again; it copies `Cargo.lock`, which was in
   `.gitignore`.
+- A fresh login reuses the device the crypto store belongs to. Without `session.json` (or
+  with a rejected one) the bot logged in as a new device, the SDK refused to pair that with
+  the existing crypto store, and the retry panicked -- a crash loop that left a dead device on
+  the account per restart. A homeserver that is still starting no longer counts as a rejected
+  session either.
 
 ### Added
 - A weekly activity payout. Messages and images are counted per user and per room and turned

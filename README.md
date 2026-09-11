@@ -321,6 +321,10 @@ resumes where the previous run stopped instead of replaying the timeline.
 
 Back up `STORE_PATH` together with the database, or the bot logs in again and re-syncs.
 
+If the session is rejected or `session.json` is missing, the bot logs in again as the device
+its crypto store belongs to, so the device identity and the room keys survive that as well.
+Only the password is needed for it.
+
 ### Encrypted rooms
 The bot works in encrypted rooms. `STORE_PATH` also holds its crypto store, so the device and
 its room keys survive a restart -- which is what keeps the bot able to read messages sent
@@ -331,6 +335,9 @@ Two consequences worth knowing:
 - Delete `STORE_PATH` and the bot loses its device identity along with every room key it had.
   It logs in again as a new device and can only read messages sent from that point on. The old
   devices stay on the account until somebody removes them in a client.
+- The reverse is true as well: if you remove the bot's device from the account in a client,
+  delete `STORE_PATH` too. The crypto store still belongs to that device, and the bot would
+  keep logging in as it.
 - The bot is an unverified session. That is fine by default, but see
   [Limitations](#limitations) if members of your room restrict encryption to verified
   sessions.

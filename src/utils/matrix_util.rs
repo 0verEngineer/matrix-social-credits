@@ -1,8 +1,9 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use matrix_sdk::ruma::DeviceId;
 use matrix_sdk::ruma::api::error::{ErrorBody, ErrorKind, RetryAfter};
 use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
-use matrix_sdk::{Client, Error, Room};
+use matrix_sdk::{Client, ClientBuildError, Error, Room};
 use tracing::{error, info, warn};
 
 use crate::utils::session::SessionStore;
@@ -105,32 +106,107 @@ fn backoff_for(attempt: u32) -> Duration {
     (base + jitter).min(MAX_BACKOFF + Duration::from_secs(1))
 }
 
-/// Restore a stored session, or log in and store the resulting one.
+/// Why [`retry_within_budget`] stopped.
+enum RetryError {
+    /// Trying again would fail the same way.
+    Permanent(Error),
+    /// The last failure was transient, but the budget is used up.
+    BudgetExhausted(Error),
+}
+
+/// Run `op` until it succeeds, `classify` calls its error permanent, or `deadline` passes.
+///
+/// The wait between attempts is what the homeserver asked for, or our own backoff.
+async fn retry_within_budget<T>(
+    what: &str,
+    deadline: SystemTime,
+    mut op: impl AsyncFnMut() -> Result<T, Error>,
+    classify: impl Fn(&Error) -> Retryable,
+) -> Result<T, RetryError> {
+    let mut attempt: u32 = 0;
+
+    loop {
+        let error = match op().await {
+            Ok(value) => return Ok(value),
+            Err(error) => error,
+        };
+
+        let wait = match classify(&error) {
+            Retryable::No => return Err(RetryError::Permanent(error)),
+            Retryable::Yes { retry_after } => retry_after
+                .unwrap_or_else(|| backoff_for(attempt))
+                .clamp(MIN_BACKOFF, MAX_BACKOFF),
+        };
+
+        if SystemTime::now() + wait > deadline {
+            return Err(RetryError::BudgetExhausted(error));
+        }
+
+        attempt += 1;
+        warn!(
+            attempt,
+            wait_secs = wait.as_secs(),
+            error = %error,
+            "{what} failed, retrying"
+        );
+        tokio::time::sleep(wait).await;
+    }
+}
+
+/// Build a client and restore the stored session into it, or log in and store the resulting
+/// session. Hands back the client that ended up logged in.
 ///
 /// Restoring is tried first so a restart does not create yet another device and does not hit
 /// the `/login` rate limit at all. If the homeserver rejects the stored session (revoked
 /// token, account logged out elsewhere) the file is dropped and a fresh login is performed.
+///
+/// The login happens on a *new* client. matrix-sdk allows exactly one session per client and
+/// panics on the second, so a client that has had the rejected session restored into it is
+/// of no use for logging in.
+///
+/// The login also asks for the device the crypto store belongs to, if there is one. Without
+/// that the homeserver hands out a new device, the SDK then refuses to pair it with the
+/// existing crypto store, and the client is left half initialised -- retrying that panics
+/// too. See [`SessionStore::stored_device_id`].
 pub async fn authenticate(
-    client: &Client,
+    build_client: impl AsyncFn() -> Result<Client, ClientBuildError>,
     store: &SessionStore,
     username: &str,
     password: &str,
     device_display_name: &str,
     budget: Duration,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Client> {
+    let deadline = SystemTime::now() + budget;
+
     if let Some(session) = store.load() {
+        let client = build_client().await?;
         match client.restore_session(session).await {
             Ok(()) => {
                 // restore_session only loads the tokens; ask the homeserver whether they are
-                // still valid before we rely on them.
-                match client.whoami().await {
+                // still valid before we rely on them. A homeserver that is not up yet is not
+                // a rejection, so this is retried like the login is.
+                let whoami = retry_within_budget(
+                    "whoami",
+                    deadline,
+                    async || client.whoami().await.map_err(Error::from),
+                    classify_error,
+                )
+                .await;
+
+                match whoami {
                     Ok(_) => {
                         info!("Reused the stored session");
-                        return Ok(());
+                        return Ok(client);
                     }
-                    Err(error) => {
+                    Err(RetryError::Permanent(error)) => {
                         warn!(%error, "The stored session was rejected, logging in again");
                         store.clear();
+                    }
+                    Err(RetryError::BudgetExhausted(error)) => {
+                        return Err(anyhow::anyhow!(
+                            "Homeserver still unreachable after {}s, giving up: {error}",
+                            budget.as_secs()
+                        ));
                     }
                 }
             }
@@ -139,9 +215,22 @@ pub async fn authenticate(
                 store.clear();
             }
         }
+
+        // Closes the store with it, before the device id is read and a new client opens it.
+        drop(client);
     }
 
-    login_with_retry(client, username, password, device_display_name, budget).await?;
+    let device_id = store.stored_device_id().await;
+    let client = build_client().await?;
+    login_with_retry(
+        &client,
+        username,
+        password,
+        device_id.as_deref(),
+        device_display_name,
+        deadline,
+    )
+    .await?;
 
     match client.matrix_auth().session() {
         Some(session) => {
@@ -153,7 +242,7 @@ pub async fn authenticate(
         None => warn!("Logged in but no session to save"),
     }
 
-    Ok(())
+    Ok(client)
 }
 
 /// Log in, retrying while the homeserver is unreachable or rate limiting us.
@@ -162,54 +251,59 @@ pub async fn authenticate(
 /// one of the endpoints Synapse rate limits most aggressively, and with
 /// `restart: unless-stopped` a crash on 429 turns into a restart loop that makes the rate
 /// limiting worse.
+///
+/// `device_id` is the device the crypto store belongs to. Passing it makes the homeserver
+/// reuse that device instead of creating a new one, which is the only way a fresh login can
+/// work with an existing crypto store.
 async fn login_with_retry(
     client: &Client,
     username: &str,
     password: &str,
+    device_id: Option<&DeviceId>,
     device_display_name: &str,
-    budget: Duration,
+    deadline: SystemTime,
 ) -> anyhow::Result<()> {
-    let deadline = SystemTime::now() + budget;
-    let mut attempt: u32 = 0;
+    // Set as soon as the homeserver has answered the login, before the local stores are
+    // opened for the new session. A failure after that point is not the homeserver's and
+    // does not go away by asking again -- the SDK panics on a second login attempt.
+    let login_accepted = || client.auth_api().is_some();
 
-    loop {
-        let result = client
-            .matrix_auth()
-            .login_username(username, password)
-            .initial_device_display_name(device_display_name)
-            .send()
-            .await;
-
-        let error = match result {
-            Ok(_) => return Ok(()),
-            Err(error) => error,
-        };
-
-        let wait = match classify_error(&error) {
-            Retryable::No => {
-                return Err(anyhow::anyhow!("Login rejected by the homeserver: {error}"));
+    let result = retry_within_budget(
+        "Login",
+        deadline,
+        async || {
+            let mut login = client
+                .matrix_auth()
+                .login_username(username, password)
+                .initial_device_display_name(device_display_name);
+            if let Some(device_id) = device_id {
+                login = login.device_id(device_id.as_str());
             }
-            Retryable::Yes { retry_after } => retry_after
-                .unwrap_or_else(|| backoff_for(attempt))
-                .clamp(MIN_BACKOFF, MAX_BACKOFF),
-        };
+            login.send().await.map(|_| ())
+        },
+        |error| {
+            if login_accepted() {
+                Retryable::No
+            } else {
+                classify_error(error)
+            }
+        },
+    )
+    .await;
 
-        let now = SystemTime::now();
-        if now + wait > deadline {
-            return Err(anyhow::anyhow!(
-                "Login still failing after {}s, giving up: {error}",
-                budget.as_secs()
-            ));
+    match result {
+        Ok(()) => Ok(()),
+        Err(RetryError::Permanent(error)) if login_accepted() => Err(anyhow::anyhow!(
+            "Logged in, but the client state in STORE_PATH cannot be used with this login: \
+             {error}. If the stored device is gone for good, delete STORE_PATH; the bot then \
+             starts as a new device without its old room keys"
+        )),
+        Err(RetryError::Permanent(error)) => {
+            Err(anyhow::anyhow!("Login rejected by the homeserver: {error}"))
         }
-
-        attempt += 1;
-        warn!(
-            attempt,
-            wait_secs = wait.as_secs(),
-            error = %error,
-            "Login failed, retrying"
-        );
-        tokio::time::sleep(wait).await;
+        Err(RetryError::BudgetExhausted(error)) => Err(anyhow::anyhow!(
+            "Login still failing at the end of the retry budget, giving up: {error}"
+        )),
     }
 }
 

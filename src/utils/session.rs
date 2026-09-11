@@ -1,11 +1,22 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use matrix_sdk::SqliteCryptoStore;
 use matrix_sdk::authentication::matrix::MatrixSession;
+use matrix_sdk::ruma::OwnedDeviceId;
+use matrix_sdk_crypto::store::CryptoStore;
 use tracing::{info, warn};
 
 /// File name of the stored session, created next to the state store.
 const SESSION_FILE_NAME: &str = "session.json";
+
+/// File name matrix-sdk gives the crypto store inside the store directory.
+const CRYPTO_STORE_FILE_NAME: &str = "matrix-sdk-crypto.sqlite3";
+
+/// Passphrase for the sqlite stores. There is none: the directory is only readable by the
+/// bot's own user, and a passphrase in an environment variable next to the password would
+/// not add anything. Must be the same wherever the store is opened.
+pub const STORE_PASSPHRASE: Option<&str> = None;
 
 /// Where the persistent client state lives.
 ///
@@ -32,6 +43,50 @@ impl SessionStore {
     /// Directory handed to `ClientBuilder::sqlite_store`.
     pub fn state_store_path(&self) -> &Path {
         &self.directory
+    }
+
+    /// The device the crypto store belongs to, if there is a crypto store at all.
+    ///
+    /// The crypto store is tied to exactly one device: it holds that device's Olm account
+    /// and every room key it was ever given. Logging in as any other device while this store
+    /// is on disk fails inside the SDK ("the account in the store doesn't match the account
+    /// in the constructor"), and it fails *after* the homeserver has already handed out the
+    /// new device -- so every attempt leaves another dead device on the account and the
+    /// client is left half initialised. Seen in production when `session.json` was gone but
+    /// the sqlite files were not: a crash loop that created a device per restart.
+    ///
+    /// A fresh login therefore has to ask the homeserver for this very device id. That is
+    /// also what keeps the room keys: the same device just gets a new access token.
+    ///
+    /// Read before the client is built, so the store is not open twice at the same time.
+    pub async fn stored_device_id(&self) -> Option<OwnedDeviceId> {
+        let path = self.directory.join(CRYPTO_STORE_FILE_NAME);
+        if !path.exists() {
+            return None;
+        }
+
+        // Opening the store also creates the file, which is why the existence check comes
+        // first: a store that is not there yet is not an error, it is the first start.
+        let store = match SqliteCryptoStore::open(&self.directory, STORE_PASSPHRASE).await {
+            Ok(store) => store,
+            Err(error) => {
+                warn!(path = %path.display(), %error, "Unable to open the crypto store");
+                return None;
+            }
+        };
+
+        match store.load_account().await {
+            Ok(Some(account)) => {
+                let device_id = account.device_id().to_owned();
+                info!(%device_id, "The crypto store belongs to a known device");
+                Some(device_id)
+            }
+            Ok(None) => None,
+            Err(error) => {
+                warn!(path = %path.display(), %error, "Unable to read the crypto store");
+                None
+            }
+        }
     }
 
     fn session_path(&self) -> PathBuf {
@@ -98,4 +153,58 @@ fn restrict_permissions(path: &Path) -> std::io::Result<()> {
 #[cfg(not(unix))]
 fn restrict_permissions(_path: &Path) -> std::io::Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use matrix_sdk::ruma::{device_id, user_id};
+    use matrix_sdk_crypto::olm::Account;
+    use matrix_sdk_crypto::store::types::PendingChanges;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn no_crypto_store_means_no_device() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path()).unwrap();
+
+        assert_eq!(store.stored_device_id().await, None);
+        // Asking must not have created one either.
+        assert!(!dir.path().join(CRYPTO_STORE_FILE_NAME).exists());
+    }
+
+    #[tokio::test]
+    async fn an_empty_crypto_store_has_no_device_yet() {
+        let dir = tempfile::tempdir().unwrap();
+        SqliteCryptoStore::open(dir.path(), STORE_PASSPHRASE)
+            .await
+            .unwrap();
+        let store = SessionStore::new(dir.path()).unwrap();
+
+        assert_eq!(store.stored_device_id().await, None);
+    }
+
+    /// The situation from production: the sqlite files survived, `session.json` did not.
+    #[tokio::test]
+    async fn the_device_of_an_existing_account_is_read_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let crypto_store = SqliteCryptoStore::open(dir.path(), STORE_PASSPHRASE)
+            .await
+            .unwrap();
+        let account =
+            Account::with_device_id(user_id!("@bot:example.org"), device_id!("THTSUUHDAQ"));
+        crypto_store
+            .save_pending_changes(PendingChanges {
+                account: Some(account),
+            })
+            .await
+            .unwrap();
+        drop(crypto_store);
+
+        let store = SessionStore::new(dir.path()).unwrap();
+        assert_eq!(
+            store.stored_device_id().await.as_deref(),
+            Some(device_id!("THTSUUHDAQ"))
+        );
+    }
 }

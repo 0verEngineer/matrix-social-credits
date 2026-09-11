@@ -10,7 +10,7 @@ use crate::utils::autojoin::on_stripped_state_member;
 use crate::utils::matrix_util::{Retryable, authenticate, classify_error, log_retry_configuration};
 use crate::utils::payout::{PayoutConfig, spawn_payout_task};
 use crate::utils::schedule::PayoutSchedule;
-use crate::utils::session::SessionStore;
+use crate::utils::session::{STORE_PASSPHRASE, SessionStore};
 use crate::utils::user_util::{initial_admin_user_setup, resolve_configured_user_id};
 use matrix_sdk::Room;
 use matrix_sdk::config::RequestConfig;
@@ -142,19 +142,23 @@ async fn main() -> anyhow::Result<()> {
     info!(path = %store_path, "Using the client state store");
 
     log_retry_configuration(http_retry_limit, http_max_retry_time);
-    let client = Client::builder()
-        .homeserver_url(homeserver_url.clone())
-        .sqlite_store(session_store.state_store_path(), None)
-        .request_config(
-            RequestConfig::new()
-                .retry_limit(http_retry_limit)
-                .max_retry_time(http_max_retry_time),
-        )
-        .build()
-        .await?;
+    // Built by `authenticate`, possibly twice: a client that has had a session restored into
+    // it cannot log in any more.
+    let build_client = async || {
+        Client::builder()
+            .homeserver_url(homeserver_url.clone())
+            .sqlite_store(session_store.state_store_path(), STORE_PASSPHRASE)
+            .request_config(
+                RequestConfig::new()
+                    .retry_limit(http_retry_limit)
+                    .max_retry_time(http_max_retry_time),
+            )
+            .build()
+            .await
+    };
 
-    authenticate(
-        &client,
+    let client = authenticate(
+        build_client,
         &session_store,
         username.as_str(),
         password.as_str(),
