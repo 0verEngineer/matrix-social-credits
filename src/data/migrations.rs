@@ -13,7 +13,7 @@ use crate::utils::emoji_util::normalize_emoji;
 // migration 2 fail on a fresh database with a duplicate column, and only for new installs.
 
 /// Schema version this build expects. Stored in SQLite's `user_version`.
-const SCHEMA_VERSION: i32 = 3;
+const SCHEMA_VERSION: i32 = 4;
 
 /// How long SQLite waits for a lock before returning SQLITE_BUSY.
 const BUSY_TIMEOUT_MS: i32 = 5_000;
@@ -76,6 +76,13 @@ pub fn migrate(conn: &Connection) -> Result<(), Error> {
         info!("Applying schema migration 3: activity counters, bot state");
         migrate_to_v3(conn)?;
         version = 3;
+        conn.pragma_update(None, "user_version", version)?;
+    }
+
+    if version < 4 {
+        info!("Applying schema migration 4: rooms have to be activated");
+        migrate_to_v4(conn)?;
+        version = 4;
         conn.pragma_update(None, "user_version", version)?;
     }
 
@@ -211,6 +218,29 @@ fn migrate_to_v3(conn: &Connection) -> Result<(), Error> {
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );
+        ",
+    )
+}
+
+/// The per-room on/off switch, see [`crate::data::room`].
+///
+/// Every room the bot has been in so far is written down as inactive. Missing rows count as
+/// inactive too, so this is not strictly needed -- but it makes the state of the existing
+/// rooms visible in the database instead of implied by an absence, and it is the record of
+/// what this migration did to them: it switched them all off, and the admin has to
+/// `!activate` each one that should keep going.
+fn migrate_to_v4(conn: &Connection) -> Result<(), Error> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS room (
+            room_id TEXT PRIMARY KEY,
+            active INTEGER NOT NULL DEFAULT 0
+        );
+
+        INSERT OR IGNORE INTO room (room_id, active)
+            SELECT room_id, 0 FROM user_room_data
+             UNION
+            SELECT room_id, 0 FROM emoji;
         ",
     )
 }
@@ -430,6 +460,40 @@ mod tests {
             1,
             "seen_at must be backfilled, not left at 0"
         );
+    }
+
+    /// The first deployment with this migration posted the weekly payout into every room the
+    /// bot had ever been invited into. From now on a room is off until the admin says
+    /// otherwise, and that has to include the rooms that already exist.
+    #[test]
+    fn migration_switches_every_known_room_off() {
+        let conn = legacy_db();
+        conn.execute_batch(
+            "
+            INSERT INTO user (id, name, url, user_type) VALUES (1,'alice','example.org',0);
+            INSERT INTO user_room_data (id, user_id, room_id, social_credit) VALUES (10,1,'!scored',250);
+            INSERT INTO emoji (id, room_id, emoji, social_credit) VALUES (1,'!emoji-only','😑',-25);
+            ",
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let rooms: Vec<(String, bool)> = {
+            let mut stmt = conn
+                .prepare("SELECT room_id, active FROM room ORDER BY room_id")
+                .unwrap();
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+            rows.map(|r| r.unwrap()).collect()
+        };
+        assert_eq!(
+            rooms,
+            vec![
+                ("!emoji-only".to_owned(), false),
+                ("!scored".to_owned(), false)
+            ]
+        );
+        assert!(!crate::data::room::is_room_active(&conn, "!scored").unwrap());
     }
 
     #[test]

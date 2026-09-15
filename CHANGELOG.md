@@ -42,6 +42,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   session either.
 
 ### Added
+- Rooms have to be activated. The bot still joins every room it is invited into, but it does
+  nothing there until the admin sends `!activate`: nothing is counted or scored, the weekly
+  payout is not posted, and nobody but the admin gets an answer. `!deactivate` switches a room
+  off again. Neither resets anything; scores, emojis and counters are kept. The migration
+  marks every existing room as inactive, so after upgrading the admin has to `!activate` each
+  room the bot should keep working in.
+- `!help` lists the admin commands under their own heading.
 - A weekly activity payout. Messages and images are counted per user and per room and turned
   into social credit on a schedule — by default Sunday at 20:00, one point per message and
   five per image — announced in the room in a single, length-capped message. Reactions,

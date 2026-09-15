@@ -68,6 +68,8 @@ Matrix bot for a social credit system
 - The bot user can be created with Element / Element Web or any other Matrix client that
   supports registering a new user.
 - Invite the bot into a room; it accepts invitations automatically.
+- The admin switches the bot on in that room with `!activate`. Until then it stays quiet
+  there -- see [Activating a room](#activating-a-room).
 - The admin registers the emojis that change the score, see [Commands](#commands).
 
 ### Which user the container runs as
@@ -242,9 +244,25 @@ was idle needs the same counters as awarding points does.
 | `!list_emoji` | everyone | Registered emojis and their score change. |
 | `!register_emoji <emoji> <score>` | admin | Register an emoji, e.g. `!register_emoji 😑 -25`. |
 | `!unregister_emoji <emoji>` | admin | Remove a registered emoji again. |
+| `!activate` | admin | Switch the bot on in the current room. |
+| `!deactivate` | admin | Switch it off again; scores and emojis are kept. |
 
 `-` and `_` are interchangeable in every command, and `!list_emoji`, `!list-emoji`,
-`!list_emojis` and `!list-emojis` all work.
+`!list_emojis` and `!list-emojis` all work. `!help` lists the admin commands under their own
+heading.
+
+### Activating a room
+
+The bot joins every room it is invited into, but it does nothing there until the admin sends
+`!activate`. In a room that is not active nothing is counted, no reaction changes a score, the
+weekly payout is not posted, and nobody but the admin gets an answer -- the admin can still use
+`!help`, `!activate` and `!deactivate`, everyone else is ignored without a word. That keeps
+the bot out of rooms it cannot leave, such as a server's welcome room.
+
+`!activate` and `!deactivate` only flip the switch. Neither resets anything: scores, registered
+emojis and the activity counters of the current period are kept, so a room switched off and
+on again carries on where it left off. If a room had counted activity before it was switched
+off, that activity is settled at the first payout after it is switched on again.
 
 ### Usage
 React with a registered emoji to a message to change the score of the user who sent it.
@@ -305,6 +323,8 @@ Details worth knowing:
   from the moment the bot starts to the next payout, which can be a few hours; docking
   everybody who did not happen to write in that window would be a poor introduction. Anything
   shorter than half a week is treated that way.
+- **Only active rooms are settled.** An inactive room is skipped like one whose member list
+  could not be read: nobody is awarded or docked, and its counters are kept.
 - **There is no floor.** A score can go negative, from the penalty as much as from a reaction.
 
 <!-- OPERATING -->

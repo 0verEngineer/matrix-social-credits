@@ -16,6 +16,7 @@ use tracing::{error, info, warn};
 
 use crate::data::activity::{Activity, clear_room_activity, pending_activity};
 use crate::data::bot_state::{LAST_PAYOUT_AT, get_timestamp, set_timestamp};
+use crate::data::room::active_rooms;
 use crate::data::user::HtmlAndTextAnswer;
 use crate::data::user_room_data::{RoomUser, add_social_credit_on, users_with_room_data};
 use crate::utils::matrix_util::send_message;
@@ -209,10 +210,30 @@ fn last_payout(conn: &Connection, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
 
 /// Award the points of one period, dock the idle, and announce both.
 async fn run_payout(conn: &Arc<Mutex<Connection>>, client: &Client, config: PayoutConfig) {
+    // Only rooms the admin has activated are settled. An inactive room keeps whatever
+    // counters it has, the same as a room whose member list could not be read: `!activate`
+    // is not a reset, and the next payout after it covers them.
+    let active = {
+        let Some(connection) = lock_or_stop(conn) else {
+            return;
+        };
+        match active_rooms(&connection) {
+            Ok(active) => active,
+            Err(error) => {
+                error!(%error, "Unable to read the active rooms, skipping the activity payout");
+                return;
+            }
+        }
+    };
+
     // Who is in which room has to come from the client, before the database is touched: the
     // penalty may only reach people who are actually still in the room, and the awards may
     // only reach rooms the bot is still in.
-    let rooms = client.joined_rooms();
+    let rooms: Vec<Room> = client
+        .joined_rooms()
+        .into_iter()
+        .filter(|room| active.contains(room.room_id().as_str()))
+        .collect();
     let own_user_id = client.user_id().map(|id| id.to_owned());
 
     let mut by_id: HashMap<String, Room> = HashMap::with_capacity(rooms.len());

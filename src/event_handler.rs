@@ -1,12 +1,13 @@
 use crate::data::activity::{ActivityKind, record_activity};
 use crate::data::emoji::{Emoji, delete_emoji, find_emoji_in_db, insert_emoji};
 use crate::data::event::{Event, find_event_in_db, insert_event};
-use crate::data::user::{User, UserType};
+use crate::data::room::{is_room_active, set_room_active};
+use crate::data::user::{HtmlAndTextAnswer, User, UserType, find_user_in_db};
 use crate::data::user_room_data::add_social_credit;
 use crate::utils::emoji_util::{get_emoji_list_answer, normalize_emoji};
 use crate::utils::matrix_util::send_message;
 use crate::utils::message::{escape_html, heading, notice_html, notice_plain};
-use crate::utils::user_util::{compare_user, get_user_list_answer, setup_user};
+use crate::utils::user_util::{compare_user, get_user_list_answer, setup_user, split_user_id};
 use matrix_sdk::ruma::events;
 use matrix_sdk::ruma::events::room::message::{MessageType, Relation};
 use matrix_sdk::ruma::events::{AnySyncMessageLikeEvent, AnySyncTimelineEvent};
@@ -14,7 +15,7 @@ use matrix_sdk::ruma::{EventId, OwnedUserId, UserId};
 use matrix_sdk::{Room, RoomState};
 use rusqlite::Connection;
 use std::sync::{Arc, Mutex};
-use tracing::{debug, error, trace};
+use tracing::{debug, error, info, trace};
 
 pub struct EventHandler {
     conn: Arc<Mutex<Connection>>,
@@ -61,6 +62,16 @@ impl EventHandler {
             return;
         }
         if self.handle_sender_is_the_bot(&event) {
+            return;
+        }
+
+        // Nothing is counted, scored or answered in a room until the admin has switched it
+        // on. The bot joins every room it is invited into, and before this check it went to
+        // work in all of them -- old test rooms, the welcome room it cannot be kicked out of.
+        // This comes before setup_user on purpose: an inactive room must not leave user rows
+        // behind either.
+        if !self.is_room_active(room.room_id().as_str()) {
+            self.on_event_in_inactive_room(&event, &room).await;
             return;
         }
 
@@ -312,10 +323,137 @@ impl EventHandler {
             "!unregister_emoji" | "!unregister-emoji" => {
                 self.handle_unregister_emoji(room, sender, arguments).await
             }
+            "!activate" => {
+                if self.require_admin(room, sender).await {
+                    self.handle_activate(room).await
+                }
+            }
+            "!deactivate" => {
+                if self.require_admin(room, sender).await {
+                    self.handle_deactivate(room).await
+                }
+            }
             _ => return false,
         }
 
         true
+    }
+
+    /// What still gets through in a room that is not active: the admin, and only for the
+    /// commands that make sense before the bot works there.
+    ///
+    /// Everybody else is ignored without a word. An answer -- even "you are not allowed" --
+    /// would be the bot making noise in a room it has been told to stay out of, and the
+    /// admin can find `!activate` in the README.
+    async fn on_event_in_inactive_room(&self, event: &AnySyncMessageLikeEvent, room: &Room) {
+        let Some(body) = plain_text_body(event) else {
+            return;
+        };
+        let (command, _) = split_command(&body);
+        if !matches!(command, "!help" | "!activate" | "!deactivate") {
+            return;
+        }
+
+        if !self.is_admin(event.sender()) {
+            trace!(sender = %event.sender(), room_id = %room.room_id(), "Ignoring a command in an inactive room");
+            return;
+        }
+
+        match command {
+            "!help" => self.handle_help(room).await,
+            "!activate" => self.handle_activate(room).await,
+            _ => self.handle_deactivate(room).await,
+        }
+    }
+
+    fn is_room_active(&self, room_id: &str) -> bool {
+        let connection = match self.conn.lock() {
+            Ok(connection) => connection,
+            Err(_) => {
+                error!("Database mutex is poisoned");
+                return false;
+            }
+        };
+        match is_room_active(&connection, room_id) {
+            Ok(active) => active,
+            Err(error) => {
+                error!(room_id, %error, "Unable to read whether the room is active");
+                false
+            }
+        }
+    }
+
+    fn set_room_active(&self, room_id: &str, active: bool) -> bool {
+        let connection = match self.conn.lock() {
+            Ok(connection) => connection,
+            Err(_) => {
+                error!("Database mutex is poisoned");
+                return false;
+            }
+        };
+        match set_room_active(&connection, room_id, active) {
+            Ok(()) => true,
+            Err(error) => {
+                error!(room_id, active, %error, "Unable to store whether the room is active");
+                false
+            }
+        }
+    }
+
+    /// Whether `user_id` is the admin, without creating anything.
+    ///
+    /// `setup_user` would do the lookup too, but it inserts the user when it does not find
+    /// one. The admin row always exists, it is written at startup.
+    fn is_admin(&self, user_id: &UserId) -> bool {
+        let (name, url) = split_user_id(user_id);
+        find_user_in_db(&self.conn, &name, &url)
+            .is_some_and(|user| matches!(user.user_type, UserType::Admin))
+    }
+
+    /// Switch the bot on in this room. Nothing is reset: whatever scores, emojis and
+    /// counters the room already has carry on from where they were.
+    async fn handle_activate(&self, room: &Room) {
+        let room_id = room.room_id().as_str();
+
+        if self.is_room_active(room_id) {
+            send_message(room, notice_plain("This room is already active")).await;
+            return;
+        }
+        if !self.set_room_active(room_id, true) {
+            send_message(room, notice_plain("Failed to activate this room")).await;
+            return;
+        }
+
+        info!(room_id, "Room activated");
+        send_message(
+            room,
+            notice_plain("The social credit system is now active in this room"),
+        )
+        .await;
+    }
+
+    /// Switch the bot off in this room. The data stays, so `!activate` picks up again where
+    /// this left off.
+    async fn handle_deactivate(&self, room: &Room) {
+        let room_id = room.room_id().as_str();
+
+        if !self.is_room_active(room_id) {
+            send_message(room, notice_plain("This room is not active")).await;
+            return;
+        }
+        if !self.set_room_active(room_id, false) {
+            send_message(room, notice_plain("Failed to deactivate this room")).await;
+            return;
+        }
+
+        info!(room_id, "Room deactivated");
+        send_message(
+            room,
+            notice_plain(
+                "The social credit system is now inactive in this room. Scores and emojis are kept; !activate switches it back on",
+            ),
+        )
+        .await;
     }
 
     /// Count one message or image towards the weekly payout.
@@ -386,52 +524,8 @@ impl EventHandler {
     }
 
     async fn handle_help(&self, room: &Room) {
-        // The placeholders have to be escaped. As literal <emoji> and <social_credit> they
-        // were swallowed by every client as unknown HTML tags, so the help text read
-        // "!register_emoji  : Register an emoji ...".
-        let commands = [
-            (
-                "!list",
-                "List all users and their social credit score for the current room",
-            ),
-            (
-                "!list_emoji",
-                "List all registered emojis and their social credit score for the current room",
-            ),
-            (
-                "!register_emoji <emoji> <social_credit>",
-                "Register an emoji with a social credit score for the current room. Example: !register_emoji 😑 -25",
-            ),
-            (
-                "!unregister_emoji <emoji>",
-                "Remove a registered emoji from the current room. Example: !unregister_emoji 😑",
-            ),
-        ];
-
-        let plain = std::iter::once("Commands:".to_owned())
-            .chain(
-                commands
-                    .iter()
-                    .map(|(usage, description)| format!("- {usage}: {description}")),
-            )
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        let html = format!(
-            "{}{}",
-            heading("Commands:"),
-            commands
-                .iter()
-                .map(|(usage, description)| format!(
-                    "<b>{}</b>: {}",
-                    escape_html(usage),
-                    escape_html(description)
-                ))
-                .collect::<Vec<_>>()
-                .join("<br>")
-        );
-
-        send_message(room, notice_html(plain, html)).await;
+        let answer = help_answer();
+        send_message(room, notice_html(answer.text, answer.html)).await;
     }
 
     async fn handle_register_emoji(&self, room: &Room, sender: &User, arguments: &str) {
@@ -529,6 +623,100 @@ impl EventHandler {
     }
 }
 
+/// Commands everybody may use, and the ones only the admin may.
+///
+/// Two lists rather than one with a "(admin)" marker: somebody who is not the admin can stop
+/// reading at the first heading.
+const COMMANDS: [(&str, &str); 3] = [
+    ("!help", "Show this list"),
+    (
+        "!list",
+        "List all users and their social credit score for the current room",
+    ),
+    (
+        "!list_emoji",
+        "List all registered emojis and their social credit score for the current room",
+    ),
+];
+
+const ADMIN_COMMANDS: [(&str, &str); 4] = [
+    (
+        "!register_emoji <emoji> <social_credit>",
+        "Register an emoji with a social credit score for the current room. Example: !register_emoji 😑 -25",
+    ),
+    (
+        "!unregister_emoji <emoji>",
+        "Remove a registered emoji from the current room. Example: !unregister_emoji 😑",
+    ),
+    (
+        "!activate",
+        "Switch the bot on in the current room. Nothing is counted, scored or answered before that",
+    ),
+    (
+        "!deactivate",
+        "Switch the bot off in the current room again. Scores and emojis are kept",
+    ),
+];
+
+/// The `!help` answer.
+///
+/// The placeholders have to be escaped. As literal <emoji> and <social_credit> they were
+/// swallowed by every client as unknown HTML tags, so the help text read
+/// "!register_emoji  : Register an emoji ...".
+fn help_answer() -> HtmlAndTextAnswer {
+    fn section(title: &str, commands: &[(&str, &str)]) -> (String, String) {
+        let plain = std::iter::once(title.to_owned())
+            .chain(
+                commands
+                    .iter()
+                    .map(|(usage, description)| format!("- {usage}: {description}")),
+            )
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let html = format!(
+            "{}{}",
+            heading(title),
+            commands
+                .iter()
+                .map(|(usage, description)| format!(
+                    "<b>{}</b>: {}",
+                    escape_html(usage),
+                    escape_html(description)
+                ))
+                .collect::<Vec<_>>()
+                .join("<br>")
+        );
+
+        (plain, html)
+    }
+
+    let (plain, html) = section("Commands:", &COMMANDS);
+    let (admin_plain, admin_html) = section("Admin commands:", &ADMIN_COMMANDS);
+
+    HtmlAndTextAnswer {
+        text: format!("{plain}\n\n{admin_plain}"),
+        html: format!("{html}<br><br>{admin_html}"),
+    }
+}
+
+/// The body of a plain text message, or `None` for anything that is not one.
+///
+/// Edits are not messages here either -- the original was already handled when it arrived,
+/// and its edited fallback body starts with "* ".
+fn plain_text_body(event: &AnySyncMessageLikeEvent) -> Option<String> {
+    let events::AnyMessageLikeEventContent::RoomMessage(content) = event.original_content()? else {
+        return None;
+    };
+    if !matches!(content.msgtype, MessageType::Text(..)) {
+        return None;
+    }
+    if matches!(content.relates_to, Some(Relation::Replacement(_))) {
+        return None;
+    }
+    Some(content.body().trim().to_owned())
+}
+
 /// The author of the event a reaction points at, together with that event's id.
 ///
 /// The annotated event is frequently one the bot cannot read: in an encrypted room it arrives
@@ -556,7 +744,7 @@ mod tests {
     use matrix_sdk::ruma::events::AnySyncTimelineEvent;
     use matrix_sdk::ruma::serde::Raw;
 
-    use super::{annotated_event_author, split_command};
+    use super::{annotated_event_author, help_answer, split_command};
 
     /// A reaction points at a message. In an encrypted room the bot often cannot read that
     /// message -- it was sent before the bot's device existed, or its author does not share
@@ -614,6 +802,37 @@ mod tests {
         let event = raw.deserialize().unwrap();
 
         assert!(annotated_event_author(&event).is_none());
+    }
+
+    /// The admin's commands are listed under their own heading, so somebody who is not the
+    /// admin can stop reading at the first one.
+    #[test]
+    fn help_lists_the_admin_commands_separately() {
+        let answer = help_answer();
+
+        let commands_at = answer.text.find("Commands:").unwrap();
+        let admin_at = answer.text.find("Admin commands:").unwrap();
+        assert!(commands_at < admin_at);
+
+        let (everyone, admin) = answer.text.split_at(admin_at);
+        assert!(everyone.contains("- !list:"));
+        assert!(!everyone.contains("!register_emoji"));
+        assert!(admin.contains("- !register_emoji <emoji> <social_credit>:"));
+        assert!(admin.contains("- !activate:"));
+        assert!(admin.contains("- !deactivate:"));
+
+        // The two sections are separated by a blank line in both bodies.
+        assert!(answer.text.contains("\n\nAdmin commands:"));
+        assert!(answer.html.contains("<br><br><b>Admin commands:</b><br>"));
+    }
+
+    /// The placeholders used to be swallowed by clients as unknown HTML tags.
+    #[test]
+    fn help_escapes_the_placeholders() {
+        let answer = help_answer();
+
+        assert!(answer.html.contains("&lt;emoji&gt; &lt;social_credit&gt;"));
+        assert!(!answer.html.contains("<emoji>"));
     }
 
     #[test]
