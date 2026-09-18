@@ -9,8 +9,8 @@ know about live under *Limitations* in the [README](README.md).
 
 | # | Idea | Size | Why it matters |
 | --- | --- | --- | --- |
-| 1 | [Device verification](#1-device-verification) | medium | The bot cannot read messages from anyone who restricts keys to verified sessions |
-| 2 | [A web interface](#2-a-web-interface) | large | Everything is configured through environment variables and chat commands today |
+| 1 | [Device verification](#1-device-verification) | medium | The bot cannot read messages from anyone who restricts keys to verified sessions. Decided: done through the web interface (2), not in chat |
+| 2 | [A web interface](#2-a-web-interface) | large | Everything is configured through environment variables and chat commands today; also where verification will live |
 | 3 | [Room data for every member on join](#3-room-data-for-every-member-on-join) | small | People only appear in `!list` once they have sent something |
 | 4 | [Per-room configuration](#4-per-room-configuration) | medium | Cooldown and starting score are global |
 | 5 | [More than one admin](#5-more-than-one-admin) | small | Exactly one, and only through an environment variable |
@@ -25,27 +25,64 @@ The bot runs as an unverified session. That is fine for most people, but anybody
 is set to share room keys only with verified sessions will not share them with the bot, and
 their messages stay unreadable for it. Their reactions still count.
 
-### A web interface is not needed for this
+### Decision (2026-09-18): this is done in the web interface, not in chat
 
-Worth stating up front, because it is the obvious assumption: emoji verification does not need
-a login page anywhere. The SAS ("short authentication string") flow runs over Matrix itself,
-as to-device or in-room events, and `matrix-sdk` exposes all of it. The seven emojis can be
-posted into the room, and the confirmation can be a chat command.
+The chat-only version was thought through and dropped. It is technically possible -- the SAS
+flow runs over Matrix itself, `matrix-sdk` 0.18 exposes all of it (`VerificationRequest`,
+`SasVerification` with `emoji()`, `confirm()`, `mismatch()`, `cancel()`), and a bot can post
+its seven emojis into the direct message and confirm its side. The problem is the other side
+of the screen:
 
-The only thing the bot cannot do is decide by itself whether the emojis match — that is the
-entire security property. It needs one input from a human, and a command is a perfectly good
-way to get it.
+- **The emojis only exist once the popup is open.** They come out of the key exchange, and
+  that is the moment the client shows them. The bot cannot post them ahead of time, and it has
+  no channel other than the chat.
+- **On mobile the popup covers the chat.** Element Web/Desktop shows the verification in a
+  side panel and the timeline stays readable, so the comparison works there. Element
+  Android/iOS put a sheet over the room, Element X takes the whole screen. A phone user cannot
+  see what the bot posted, so the comparison -- the entire security property of SAS -- is
+  impossible for them. What is left is pressing "they match" blind, which is trust-on-first-use
+  dressed up as verification.
+- The workarounds all amount to "use another screen": verify from the desktop once, read the
+  bot's message on a second device, or compare the session fingerprint by hand under
+  "Manually verify by text" (which Element X may not offer any more). None of them is something
+  to send every user through.
 
-### What to think about before building it
+A web page fixes exactly this: the bot's emojis, or a QR code, are shown on a screen the popup
+is not covering. The user opens the page, starts the verification from their client, and
+compares the client's emojis with the page -- or scans the QR code the page shows, which is the
+flow every Element client already knows from verifying a new login. Nothing about the bot side
+changes; it is the same `VerificationRequest` handling, with the page as the display.
 
-- **Who may verify.** Only the configured admin, and only in a direct message — not in a
-  group room where everybody can read along and confirm.
+So: verification is part of [2](#2-a-web-interface) and waits for it. Until then the
+limitation stays as documented in the README.
+
+### What to keep from the analysis
+
+Things that were settled while thinking it through and hold for the web version too:
+
+- **Every affected user verifies for themselves.** "Verified" is a judgement each client makes
+  about the bot, not a state of the bot or the room. One person verifying does nothing for
+  anyone else. Only people who have switched on "never send to unverified sessions" are
+  affected at all; everybody else already shares keys with the bot and needs to do nothing --
+  and stays that way whether or not this feature exists.
+- **Anyone may verify, not only the admin.** The bot gains and gives away nothing by it; the
+  user gains that the bot can read them. Restricting it to the admin would make it useless for
+  everyone else.
+- **What it actually costs today:** somebody with the strict setting on has their messages
+  arrive at the bot as `m.room.encrypted`, so they are not counted for the weekly payout --
+  and they are docked as idle despite being active. Reactions still count, those are not
+  encrypted. That is the concrete reason to build it.
+- **The bot can confirm its side automatically** once the user has confirmed theirs; the bot
+  never uses its own trust in anybody's device, so the human comparison on the user's side is
+  the whole check. The bot's confirmation is a formality the protocol requires.
 - **A timeout.** A verification left half-finished should be cancelled (`sas.cancel()`),
   otherwise the next attempt runs into a flow that is still open.
 - **Cross-signing.** Verifying the device against one person's session is the small version.
-  The complete version is for the bot to have its own cross-signing identity, so it is
-  verified for everybody at once instead of per session. Bigger job, and it needs a place to
-  keep the cross-signing keys.
+  The complete version is for the bot to have its own cross-signing identity
+  (`bootstrap_cross_signing()`), so it is verified as a user rather than as a device and that
+  survives a device change. The keys live in the crypto store under `STORE_PATH`; the gain
+  only materialises with a recovery key exported somewhere and restored on a fresh device.
+  Can be added later without changing anything the user does.
 - **It does not fix the past.** Verification only affects keys shared from that moment on.
   Messages that were unreadable stay unreadable.
 
@@ -53,8 +90,10 @@ way to get it.
 
 ## 2. A web interface
 
-Not needed for verification (see above), but there are things chat commands are a poor fit
-for: configuring the cooldown and the starting score per room, correcting a score by hand,
+Device verification (see [1](#1-device-verification)) is the first concrete reason to have
+one: it needs a screen the client's verification popup does not cover, to show the bot's
+emojis or a QR code on. Beyond that there are things chat commands are a poor fit for:
+configuring the cooldown and the starting score per room, correcting a score by hand,
 managing emojis with more comfort than `!register_emoji`, looking at a history, or seeing at a
 glance which rooms the bot is even in.
 
