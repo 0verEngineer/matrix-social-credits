@@ -24,6 +24,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   was never recognised and `!register_emoji` worked for nobody.
 - Simultaneous reactions no longer lose score updates; the score is changed in a single SQL
   statement.
+- A score stops at the bounds of a 32-bit integer instead of running past them. SQLite kept
+  storing beyond that, but the bot could not read the row back any more, which broke every
+  reaction from or to that user for good.
 - The cooldown is measured from the oldest reaction in the window, not the newest, and no
   longer panics on a timestamp in the future.
 - Autojoin works for rooms without a name (direct messages, freshly created rooms), stops

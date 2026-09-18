@@ -326,6 +326,8 @@ Details worth knowing:
 - **Only active rooms are settled.** An inactive room is skipped like one whose member list
   could not be read: nobody is awarded or docked, and its counters are kept.
 - **There is no floor.** A score can go negative, from the penalty as much as from a reaction.
+  The only limits are the ends of a 32-bit integer, ±2 147 483 647; a score stops there and
+  no change moves it further.
 
 <!-- OPERATING -->
 ## Operating the bot

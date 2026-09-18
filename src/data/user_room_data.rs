@@ -155,17 +155,30 @@ pub fn add_social_credit(
 
 /// Same as [`add_social_credit`], for callers that already hold the connection -- the payout
 /// applies every change of a period inside one transaction.
+///
+/// The score saturates at the `i32` bounds instead of running past them. SQLite stores a
+/// 64-bit integer and would happily keep going, but the code reads the column as `i32`: the
+/// update committed, the `RETURNING` read failed, and from then on every read of that row
+/// failed too -- reactions from or to that user, `!list` for the room. Reachable by nothing
+/// but an admin registering an emoji worth two billion points, but then permanent. The
+/// clamp is in the statement, not in Rust, for the same reason the addition is: it has to
+/// be atomic.
 pub fn add_social_credit_on(
     conn: &Connection,
     user_id: i32,
     room_id: &str,
     delta: i32,
 ) -> Result<i32, Error> {
-    let sql = "UPDATE user_room_data SET social_credit = social_credit + ?1 \
+    let sql = "UPDATE user_room_data \
+               SET social_credit = MAX(?4, MIN(?5, social_credit + ?1)) \
                WHERE user_id = ?2 AND room_id = ?3 \
                RETURNING social_credit";
 
-    conn.query_row(sql, params![delta, user_id, room_id], |row| row.get(0))
+    conn.query_row(
+        sql,
+        params![delta, user_id, room_id, i32::MIN, i32::MAX],
+        |row| row.get(0),
+    )
 }
 
 /// Everybody who has a score in this room.
@@ -368,6 +381,66 @@ mod tests {
 
         let reloaded = find_user_room_data_by_user_id_and_room_id(&db, 1, ROOM).unwrap();
         assert_eq!(reloaded.social_credit, 235);
+    }
+
+    /// SQLite stores 64-bit integers, the code reads 32-bit ones. Past `i32::MAX` the update
+    /// used to commit and the read back to fail, leaving a row nothing could read any more.
+    #[test]
+    fn the_score_stops_at_the_top_instead_of_breaking_the_row() {
+        let db = test_db();
+        let room_data = seed(&db);
+
+        assert_eq!(
+            add_social_credit(&db, room_data.user_id, ROOM, i32::MAX).unwrap(),
+            i32::MAX,
+            "250 + i32::MAX is clamped, not overflowed"
+        );
+        assert_eq!(
+            add_social_credit(&db, room_data.user_id, ROOM, 1).unwrap(),
+            i32::MAX,
+            "nothing more happens at the top"
+        );
+
+        let reloaded = find_user_room_data_by_user_id_and_room_id(&db, 1, ROOM).unwrap();
+        assert_eq!(reloaded.social_credit, i32::MAX);
+    }
+
+    #[test]
+    fn the_score_stops_at_the_bottom_too() {
+        let db = test_db();
+        let room_data = seed(&db);
+
+        assert_eq!(
+            add_social_credit(&db, room_data.user_id, ROOM, i32::MIN).unwrap(),
+            i32::MIN + 250,
+            "no overflow yet, this is an ordinary addition"
+        );
+        assert_eq!(
+            add_social_credit(&db, room_data.user_id, ROOM, -1000).unwrap(),
+            i32::MIN,
+            "-1000 would go 750 past the bottom"
+        );
+        assert_eq!(
+            add_social_credit(&db, room_data.user_id, ROOM, -1).unwrap(),
+            i32::MIN,
+            "nothing more happens at the bottom"
+        );
+
+        let reloaded = find_user_room_data_by_user_id_and_room_id(&db, 1, ROOM).unwrap();
+        assert_eq!(reloaded.social_credit, i32::MIN);
+    }
+
+    /// The clamp must not get in the way of ordinary negative scores; there is no floor at
+    /// zero on purpose.
+    #[test]
+    fn a_score_can_still_go_below_zero() {
+        let db = test_db();
+        let room_data = seed(&db);
+
+        assert_eq!(
+            add_social_credit(&db, room_data.user_id, ROOM, -300).unwrap(),
+            -50
+        );
     }
 
     #[test]
