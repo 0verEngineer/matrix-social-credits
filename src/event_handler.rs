@@ -348,30 +348,35 @@ impl EventHandler {
         true
     }
 
-    /// What still gets through in a room that is not active: the admin, and only for the
-    /// commands that make sense before the bot works there.
+    /// What still gets through in a room that is not active.
     ///
-    /// Everybody else is ignored without a word. An answer -- even "you are not allowed" --
-    /// would be the bot making noise in a room it has been told to stay out of, and the
-    /// admin can find `!activate` in the README.
+    /// `!help` is answered for everybody, so that somebody who finds the bot in a room can
+    /// find out what it is and why it is quiet. `!activate` and `!deactivate` only for the
+    /// admin; everybody else is ignored without a word there. An answer -- even "you are not
+    /// allowed" -- would be the bot making noise in a room it has been told to stay out of.
     async fn on_event_in_inactive_room(&self, event: &AnySyncMessageLikeEvent, room: &Room) {
         let Some(body) = plain_text_body(event) else {
             return;
         };
         let (command, _) = split_command(&body);
-        if !matches!(command, "!help" | "!activate" | "!deactivate") {
-            return;
-        }
-
-        if !self.is_admin(event.sender()) {
-            trace!(sender = %event.sender(), room_id = %room.room_id(), "Ignoring a command in an inactive room");
-            return;
-        }
 
         match command {
-            "!help" => self.handle_help(room).await,
-            "!activate" => self.handle_activate(room).await,
-            _ => self.handle_deactivate(room).await,
+            "!help" => {
+                let answer = help_answer(false);
+                send_message(room, notice_html(answer.text, answer.html)).await;
+            }
+            "!activate" | "!deactivate" => {
+                if !self.is_admin(event.sender()) {
+                    trace!(sender = %event.sender(), room_id = %room.room_id(), "Ignoring a command in an inactive room");
+                    return;
+                }
+                if command == "!activate" {
+                    self.handle_activate(room).await
+                } else {
+                    self.handle_deactivate(room).await
+                }
+            }
+            _ => {}
         }
     }
 
@@ -533,7 +538,7 @@ impl EventHandler {
     }
 
     async fn handle_help(&self, room: &Room) {
-        let answer = help_answer();
+        let answer = help_answer(true);
         send_message(room, notice_html(answer.text, answer.html)).await;
     }
 
@@ -844,10 +849,13 @@ const ADMIN_COMMANDS: [(&str, &str); 6] = [
 
 /// The `!help` answer.
 ///
+/// In a room that is not active it ends with a line saying so; otherwise the list of
+/// commands reads as if they worked here, and none of them do.
+///
 /// The placeholders have to be escaped. As literal <emoji> and <social_credit> they were
 /// swallowed by every client as unknown HTML tags, so the help text read
 /// "!register_emoji  : Register an emoji ...".
-fn help_answer() -> HtmlAndTextAnswer {
+fn help_answer(room_is_active: bool) -> HtmlAndTextAnswer {
     fn section(title: &str, commands: &[(&str, &str)]) -> (String, String) {
         let plain = std::iter::once(title.to_owned())
             .chain(
@@ -878,10 +886,16 @@ fn help_answer() -> HtmlAndTextAnswer {
     let (plain, html) = section("Commands:", &COMMANDS);
     let (admin_plain, admin_html) = section("Admin commands:", &ADMIN_COMMANDS);
 
-    HtmlAndTextAnswer {
-        text: format!("{plain}\n\n{admin_plain}"),
-        html: format!("{html}<br><br>{admin_html}"),
+    let mut text = format!("{plain}\n\n{admin_plain}");
+    let mut html = format!("{html}<br><br>{admin_html}");
+
+    if !room_is_active {
+        let note = "This room is not active. Nothing is counted or scored here until the admin sends !activate.";
+        text.push_str(&format!("\n\n{note}"));
+        html.push_str(&format!("<br><br><i>{}</i>", escape_html(note)));
     }
+
+    HtmlAndTextAnswer { text, html }
 }
 
 /// The body of a plain text message, or `None` for anything that is not one.
@@ -992,7 +1006,7 @@ mod tests {
     /// admin can stop reading at the first one.
     #[test]
     fn help_lists_the_admin_commands_separately() {
-        let answer = help_answer();
+        let answer = help_answer(true);
 
         let commands_at = answer.text.find("Commands:").unwrap();
         let admin_at = answer.text.find("Admin commands:").unwrap();
@@ -1012,10 +1026,24 @@ mod tests {
         assert!(answer.html.contains("<br><br><b>Admin commands:</b><br>"));
     }
 
+    /// Somebody who finds the bot in a room it has not been switched on in should learn
+    /// that from `!help`, not from the silence.
+    #[test]
+    fn help_in_an_inactive_room_says_so() {
+        let inactive = help_answer(false);
+        let active = help_answer(true);
+
+        assert!(inactive.text.ends_with(
+            "This room is not active. Nothing is counted or scored here until the admin sends !activate."
+        ));
+        assert!(inactive.html.ends_with("!activate.</i>"));
+        assert!(!active.text.contains("not active"));
+    }
+
     /// The placeholders used to be swallowed by clients as unknown HTML tags.
     #[test]
     fn help_escapes_the_placeholders() {
-        let answer = help_answer();
+        let answer = help_answer(true);
 
         assert!(answer.html.contains("&lt;emoji&gt; &lt;social_credit&gt;"));
         assert!(!answer.html.contains("<emoji>"));

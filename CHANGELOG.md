@@ -47,7 +47,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 - Rooms have to be activated. The bot still joins every room it is invited into, but it does
   nothing there until the admin sends `!activate`: nothing is counted or scored, the weekly
-  payout is not posted, and nobody but the admin gets an answer. `!deactivate` switches a room
+  payout is not posted, and only `!help` is answered. `!deactivate` switches a room
   off again. Neither resets anything; scores, emojis and counters are kept. The migration
   marks every existing room as inactive, so after upgrading the admin has to `!activate` each
   room the bot should keep working in.

@@ -263,9 +263,10 @@ start from a value set while they were away. Both are announced in the room.
 
 The bot joins every room it is invited into, but it does nothing there until the admin sends
 `!activate`. In a room that is not active nothing is counted, no reaction changes a score, the
-weekly payout is not posted, and nobody but the admin gets an answer -- the admin can still use
-`!help`, `!activate` and `!deactivate`, everyone else is ignored without a word. That keeps
-the bot out of rooms it cannot leave, such as a server's welcome room.
+weekly payout is not posted, and nothing but `!help` gets an answer -- it works for everybody
+and says that the room is not active. The admin can additionally use `!activate` and
+`!deactivate`; everything else, from anybody, is ignored without a word. That keeps the bot
+out of rooms it cannot leave, such as a server's welcome room.
 
 `!activate` and `!deactivate` only flip the switch. Neither resets anything: scores, registered
 emojis and the activity counters of the current period are kept, so a room switched off and
