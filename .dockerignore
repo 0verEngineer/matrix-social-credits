@@ -1,0 +1,20 @@
+# Build output; the previous Dockerfile-test copied the whole working directory,
+# including a multi-gigabyte target/ and the local database.
+target/
+debug/
+
+# Runtime data
+*.db
+*.db-wal
+*.db-shm
+*.db.backup
+data/
+store/
+
+.git/
+.github/
+.idea/
+Dockerfile*
+docker-compose.yml
+README.md
+LICENSE

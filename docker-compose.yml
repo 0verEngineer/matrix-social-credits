@@ -1,24 +1,62 @@
-version: '3'
-
 services:
   matrix-social-credit:
-    image: 0verengineer/matrix-social-credits
+    # Pinned on purpose, so an update is something you do rather than something that happens
+    # to you. See the README for the other tags (latest, 0.1, edge, pr-<n>).
+    image: 0verengineer/matrix-social-credits:0.1.0
+    # The image runs as uid 1000, which is usually yours, so ./data needs no chown. If it
+    # belongs to somebody else, uncomment this and name that uid instead.
+    # user: "1234:1234"
     environment:
       # The initial social credit that a user has
       INITIAL_SOCIAL_CREDIT: 250
-      # Username of the user that will be the admin of the social credit system, user needs to be on the MATRIX_HOMESERVER_URL
+      # Username of the user that will be the admin of the social credit system.
+      # A bare localpart is resolved against the bot's own server name; a full user id
+      # is accepted as well, but it has to be quoted -- "@" cannot start an unquoted
+      # value in YAML, and compose fails with "found character that cannot start any
+      # token" before it ever reaches the bot:
+      #   ADMIN_USERNAME: "@alice:example.org"
       ADMIN_USERNAME: <username>
       # Username of the bot user
       MATRIX_USERNAME: social-credit-system
-      # Password of the bot user
+      # Password of the bot user. Only used for the very first login; afterwards the stored
+      # session in STORE_PATH is reused.
       MATRIX_PASSWORD: <matrix-admin-password>
       # Homeserver url of the bot user for example https://matrix.org
       MATRIX_HOMESERVER_URL: <your homeserver url>
-      # Only 2 social credit change reactions are possible within REACTION_TIMESPAN
+      # Only REACTION_LIMIT social credit change reactions are possible within
+      # REACTION_TIMESPAN
       REACTION_LIMIT: 2
       # Timespan in minutes for the REACTION_LIMIT, like a cooldown
       REACTION_TIMESPAN: 20
       DB_PATH: /data/social_credit.db
+      # Client state store and saved session
+      STORE_PATH: /data/store
+
+      # Weekly activity payout. Set all of these to 0 to switch it off.
+      # ACTIVITY_POINTS_PER_MESSAGE: 1
+      # ACTIVITY_POINTS_PER_IMAGE: 5
+      # Deducted from anybody who spends the whole period in the room without sending anything
+      # ACTIVITY_INACTIVITY_PENALTY: 50
+      # ACTIVITY_PAYOUT_DAY: sunday
+      # ACTIVITY_PAYOUT_TIME: "20:00"
+      # Without this the schedule falls back to TZ, and then to UTC -- so 20:00 would not be
+      # 20:00 where you live.
+      # ACTIVITY_PAYOUT_TIMEZONE: Europe/Vienna
+      # ACTIVITY_PAYOUT_MAX_ENTRIES: 10
+
+      # Optional, shown with their defaults:
+      # RUST_LOG: matrix_social_credits=info,matrix_sdk=warn,matrix_sdk_crypto=error
+      # HTTP_RETRY_LIMIT: 10
+      # HTTP_MAX_RETRY_TIME_SECS: 60
+      # LOGIN_RETRY_BUDGET_SECS: 900
+      # EVENT_RETENTION_DAYS: 30
     volumes:
       - ./data/:/data
     restart: unless-stopped
+    # The bot handles SIGTERM, give it a moment to finish the current sync.
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
