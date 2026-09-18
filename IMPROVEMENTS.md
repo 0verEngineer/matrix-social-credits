@@ -11,11 +11,12 @@ know about live under *Limitations* in the [README](README.md).
 | --- | --- | --- | --- |
 | 1 | [Device verification](#1-device-verification) | medium | The bot cannot read messages from anyone who restricts keys to verified sessions. Decided: done through the web interface (2), not in chat |
 | 2 | [A web interface](#2-a-web-interface) | large | Everything is configured through environment variables and chat commands today; also where verification will live |
-| 3 | [Room data for every member on join](#3-room-data-for-every-member-on-join) | small | People only appear in `!list` once they have sent something |
-| 4 | [Per-room configuration](#4-per-room-configuration) | medium | Cooldown and starting score are global |
-| 5 | [More than one admin](#5-more-than-one-admin) | small | Exactly one, and only through an environment variable |
-| 6 | [Undo a score change when the reaction is removed](#6-undo-a-score-change-when-the-reaction-is-removed) | small | A misclick is permanent |
-| 7 | [Smaller cleanups](#7-smaller-cleanups) | small | Things noticed during the review that were not worth a fix on their own |
+| 3 | [A Matrix widget](#3-a-matrix-widget) | small, after 2 | The web interface inside Element, with the login done by the client |
+| 4 | [Room data for every member on join](#4-room-data-for-every-member-on-join) | small | People only appear in `!list` once they have sent something |
+| 5 | [Per-room configuration](#5-per-room-configuration) | medium | Cooldown and starting score are global |
+| 6 | [More than one admin](#6-more-than-one-admin) | small | Exactly one, and only through an environment variable |
+| 7 | [Undo a score change when the reaction is removed](#7-undo-a-score-change-when-the-reaction-is-removed) | small | A misclick is permanent |
+| 8 | [Smaller cleanups](#8-smaller-cleanups) | small | Things noticed during the review that were not worth a fix on their own |
 
 ---
 
@@ -97,11 +98,50 @@ configuring the cooldown and the starting score per room, correcting a score by 
 managing emojis with more comfort than `!register_emoji`, looking at a history, or seeing at a
 glance which rooms the bot is even in.
 
-The hard part is not the interface. It is the login.
+The hard part is not the interface. It is the login -- and, before that, where the interface
+runs at all.
+
+### Where it runs: in the bot, behind a JSON API
+
+Decided (2026-09-18). Everything the interface has to touch lives in the bot's process:
+
+- **Verification** goes through the `OlmMachine` in the bot's crypto store. Only the process
+  that holds the Matrix session can accept a SAS request, produce the emojis or a QR code.
+  No second process can do that on the bot's behalf, it does not have the keys.
+- **The database** is the bot's. It owns the migrations and writes on every reaction. A second
+  writer on the same SQLite file works technically (WAL, `busy_timeout`), but then the other
+  process has to know a schema this one keeps changing.
+
+So the bot grows an HTTP server (`axum`, on the same Tokio runtime as the sync loop, sharing
+the `Arc<Mutex<Connection>>` and the `Client`). Whatever the interface is, it sits in front of
+that. Three shapes were considered:
+
+| | How | Cost |
+| --- | --- | --- |
+| **All in Rust** | axum serves a JSON API *and* a small frontend (static HTML plus htmx, or a small SPA) from the same binary | one container, one deploy; web work in Rust |
+| **Rust API + Go UI** | the bot serves JSON only; a Go service does login, sessions and pages | a second container and a second place to get auth right, versioned together with the API; the Go part is UI and auth, the logic stays here |
+| **Go straight on SQLite** | the bot untouched, Go reads and writes the database | ruled out: verification is impossible, and the schema becomes a two-repository problem |
+
+The decision is the first one, built so the second stays open: the API is a real JSON API,
+not template handlers with database access in them, and the frontend is a separate consumer
+of it. The interface is a dozen endpoints and a handful of pages -- activating rooms,
+correcting scores, managing emojis, verification -- which does not justify a second service.
+If it grows, or a Go frontend is wanted for its own sake, the boundary is already there.
+
+### A normal web page, with a real login
+
+The interface lives at its own URL and works in any browser, whatever Matrix client the
+person uses. That is the entrance everybody has; the widget in [3](#3-a-matrix-widget) is a
+second one for Element users, not a replacement. On a phone the page is also the answer to the
+verification popup: the verification runs in the Matrix app, the emojis are in the browser,
+and switching between two apps works where reading behind a popup did not.
 
 ### How people could log in
 
-Two ways, neither of which puts a password anywhere near the bot.
+Two ways, neither of which puts a password anywhere near the bot. (A third -- asking for the
+Matrix password and doing `m.login.password` against the homeserver, the way synapse-admin
+does -- was considered and rejected; it works everywhere, but it is exactly the password-near-
+the-bot arrangement the other two exist to avoid.)
 
 #### a) Matrix OpenID token — works with a plain Synapse, no server configuration
 
@@ -125,7 +165,8 @@ what makes this work without configuring anything on the Synapse side.
 
 The catch is step 2: the user has to be logged in with a Matrix client to obtain the token in
 the first place, and getting it out of that client and into the web interface is a manual
-step.
+step. Inside a widget that step disappears -- the client hands the token over itself, see
+[3](#3-a-matrix-widget). On the standalone page it stays manual until (b) is available.
 
 #### b) OIDC through Matrix Authentication Service — the future-proof one, if you run MAS
 
@@ -140,14 +181,67 @@ local passwords does not have it. Worth designing for, not worth waiting for.
 
 ### Recommendation
 
-(a) is the one that works against any Synapse today, so it is where to start. (b) once MAS is
-common enough to assume — it is the same idea with a proper redirect instead of a manual step,
-and both end at the same place: a verified Matrix user id, and no password anywhere near this
-bot.
+(a) is the one that works against any Synapse today, so it is where to start. (b) once MAS is common enough to assume — it is the same
+idea with a proper redirect instead of a manual step, and both end at the same place: a
+verified Matrix user id, and no password anywhere near this bot.
+
+### Order of work
+
+1. The HTTP server in the bot, with the JSON API: rooms and their active flag, scores,
+   emojis. Token verification against the homeserver as the only auth, admin checked against
+   `ADMIN_USERNAME`.
+2. The verification endpoints on top of [1](#1-device-verification): start, current emojis or
+   QR data, state, cancel.
+3. The frontend, with a token field for login (a).
+4. (b) when MAS is in the picture.
+5. The widget, [3](#3-a-matrix-widget).
 
 ---
 
-## 3. Room data for every member on join
+## 3. A Matrix widget
+
+The web interface from [2](#2-a-web-interface), embedded in Element. Small once 2 exists: the
+same pages, the same API, one extra way in.
+
+A widget is nothing more than a state event in the room (`im.vector.modular.widgets`) with a
+URL in it; Element renders that URL inside the room, in the timeline area or the right panel.
+What makes it worth having is the login: a widget asks the client for an OpenID token through
+the widget API (`get_openid`) and the client hands it over -- no copying, no password, no
+server configuration. That is how Hookshot and Element Call authenticate, and it turns login
+option (a) of the web interface from a manual step into an automatic one.
+
+For verification it is also the best screen there is on the desktop: Element Web can pop a
+widget out into its own window, so the bot's emojis sit right next to the verification panel.
+
+### Which clients show it
+
+Widgets are an Element convention, not part of the Matrix spec, and only the Element family
+renders them.
+
+| Client | Widgets |
+| --- | --- |
+| Element Web, Element Desktop | yes, including popout into a separate window |
+| Element Android, Element iOS (classic) | yes, in a web view |
+| Element X | no general room widgets; the widget API is used internally for Element Call only, and cannot be pointed at another URL |
+| Nheko | no -- Qt without a web engine, deliberately; at best it shows that a widget exists, or its URL |
+| FluffyChat, Cinny, Fractal | no |
+
+So the widget is a convenience for Element Web and the classic mobile apps. Everybody else
+uses the normal page from [2](#2-a-web-interface), and so does anybody on Element X until it
+learns general widgets -- there has been discussion, nothing concrete.
+
+### What it needs
+
+- The widget API handshake in the frontend: answer the client's capability negotiation, ask
+  for `m.openid`, receive the token, pass it to the same login endpoint the standalone page
+  uses.
+- A way to install it: the admin adds it to a room with `/addwidget <url>` in Element, or the
+  bot writes the state event itself on `!activate` -- the second is nicer, and one more thing
+  for the bot to have permission for.
+
+---
+
+## 4. Room data for every member on join
 
 The bot creates a user's room data the first time it sees an event from them. Somebody who is
 in the room but has never written anything and never reacted does not exist for the bot, so
@@ -161,7 +255,7 @@ Watch out for large rooms: this creates one row per member.
 
 ---
 
-## 4. Per-room configuration
+## 5. Per-room configuration
 
 `INITIAL_SOCIAL_CREDIT`, `REACTION_LIMIT` and `REACTION_TIMESPAN` are environment variables and
 therefore the same everywhere. A room where the bot is a running joke wants different numbers
@@ -172,7 +266,7 @@ commands to change it or the interface from idea 2.
 
 ---
 
-## 5. More than one admin
+## 6. More than one admin
 
 There is exactly one admin, set through `ADMIN_USERNAME`, and no way to promote anybody. The
 `user_type` column already knows `Moderator` and `Admin` — the enum has been there from the
@@ -181,7 +275,7 @@ would be most of the work.
 
 ---
 
-## 6. Undo a score change when the reaction is removed
+## 7. Undo a score change when the reaction is removed
 
 Removing a reaction leaves the score where it is. Matrix sends a redaction for the reaction
 event, so the bot could see it.
@@ -192,7 +286,7 @@ removing and re-adding a reaction lets somebody spend the same cooldown slot twi
 
 ---
 
-## 7. Smaller cleanups
+## 8. Smaller cleanups
 
 Noticed during the review, none of them worth a fix on their own:
 
