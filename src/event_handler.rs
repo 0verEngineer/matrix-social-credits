@@ -3,11 +3,16 @@ use crate::data::emoji::{Emoji, delete_emoji, find_emoji_in_db, insert_emoji};
 use crate::data::event::{Event, find_event_in_db, insert_event};
 use crate::data::room::{is_room_active, set_room_active};
 use crate::data::user::{HtmlAndTextAnswer, User, UserType, find_user_in_db};
-use crate::data::user_room_data::add_social_credit;
+use crate::data::user_room_data::{
+    add_social_credit, set_social_credit, set_social_credit_for_users, users_with_room_data,
+};
 use crate::utils::emoji_util::{get_emoji_list_answer, normalize_emoji};
 use crate::utils::matrix_util::send_message;
 use crate::utils::message::{escape_html, heading, notice_html, notice_plain};
-use crate::utils::user_util::{compare_user, get_user_list_answer, setup_user, split_user_id};
+use crate::utils::user_util::{
+    compare_user, current_room_members, get_user_list_answer, resolve_configured_user_id,
+    setup_user, split_user_id,
+};
 use matrix_sdk::ruma::events;
 use matrix_sdk::ruma::events::room::message::{MessageType, Relation};
 use matrix_sdk::ruma::events::{AnySyncMessageLikeEvent, AnySyncTimelineEvent};
@@ -323,6 +328,10 @@ impl EventHandler {
             "!unregister_emoji" | "!unregister-emoji" => {
                 self.handle_unregister_emoji(room, sender, arguments).await
             }
+            "!set_score" | "!set-score" => self.handle_set_score(room, sender, arguments).await,
+            "!set_score_all" | "!set-score-all" => {
+                self.handle_set_score_all(room, sender, arguments).await
+            }
             "!activate" => {
                 if self.require_admin(room, sender).await {
                     self.handle_activate(room).await
@@ -618,6 +627,173 @@ impl EventHandler {
         send_message(room, notice_plain(format!("Emoji removed: {emoji_text}"))).await;
     }
 
+    /// Put one user's score in this room at exactly `value`.
+    ///
+    /// The user has to be in the room. That is what keeps a typo in the name from creating a
+    /// row for somebody who does not exist; for a member without a score yet the row is
+    /// created, the admin clearly wants them to have this one.
+    async fn handle_set_score(&self, room: &Room, sender: &User, arguments: &str) {
+        if !self.require_admin(room, sender).await {
+            return;
+        }
+
+        let error_message = "Invalid command usage! Example: !set_score alice 250";
+
+        let parts = arguments.split_whitespace().collect::<Vec<&str>>();
+        if parts.len() != 2 {
+            send_message(room, notice_plain(error_message)).await;
+            return;
+        }
+        let Ok(value) = parts[1].parse::<i32>() else {
+            send_message(room, notice_plain(error_message)).await;
+            return;
+        };
+
+        // A bare localpart is resolved against the bot's own server, the same way
+        // ADMIN_USERNAME is.
+        let Some(user_id) = resolve_configured_user_id(parts[0], self.own_user_id.server_name())
+        else {
+            send_message(room, notice_plain(error_message)).await;
+            return;
+        };
+        if self.is_user_the_bot(&user_id) {
+            send_message(room, notice_plain("The bot does not have a score")).await;
+            return;
+        }
+
+        let Some(members) = current_room_members(room).await else {
+            send_message(room, notice_plain("Unable to load the room member list")).await;
+            return;
+        };
+        if !members.contains(&split_user_id(&user_id)) {
+            send_message(
+                room,
+                notice_plain(format!("{user_id} is not a member of this room")),
+            )
+            .await;
+            return;
+        }
+
+        let room_id = room.room_id().as_str();
+        let Some(user) = setup_user(
+            &self.conn,
+            Some(room_id),
+            &user_id,
+            UserType::Default,
+            self.initial_social_credit,
+        ) else {
+            send_message(room, notice_plain("Failed to look up the user")).await;
+            return;
+        };
+
+        let previous = match set_social_credit(&self.conn, user.id, room_id, value) {
+            Ok(previous) => previous,
+            Err(error) => {
+                error!(user = %user_id, %error, "Unable to set the social credit score");
+                send_message(room, notice_plain("Failed to set the score")).await;
+                return;
+            }
+        };
+
+        info!(room_id, user = %user_id, previous, value, admin = %sender.name, "Score set by the admin");
+
+        let plain = format!(
+            "{} set {}'s Social Credit Score from {} to {}",
+            sender.name, user.name, previous, value
+        );
+        let html = format!(
+            "<b>{}</b> set <b>{}'s</b> Social Credit Score from <b>{}</b> to <b>{}</b>",
+            escape_html(&sender.name),
+            escape_html(&user.name),
+            previous,
+            value
+        );
+        send_message(room, notice_html(plain, html)).await;
+    }
+
+    /// Put everybody's score in this room at exactly `value`.
+    ///
+    /// "Everybody" is everyone who is in the room and already has a score here -- the same
+    /// people `!list` shows. Members who never sent anything have no score and get none;
+    /// people who left keep theirs, so that a return does not start from a value set while
+    /// they were away.
+    async fn handle_set_score_all(&self, room: &Room, sender: &User, arguments: &str) {
+        if !self.require_admin(room, sender).await {
+            return;
+        }
+
+        let error_message = "Invalid command usage! Example: !set_score_all 250";
+
+        let parts = arguments.split_whitespace().collect::<Vec<&str>>();
+        if parts.len() != 1 {
+            send_message(room, notice_plain(error_message)).await;
+            return;
+        }
+        let Ok(value) = parts[0].parse::<i32>() else {
+            send_message(room, notice_plain(error_message)).await;
+            return;
+        };
+
+        let Some(members) = current_room_members(room).await else {
+            send_message(room, notice_plain("Unable to load the room member list")).await;
+            return;
+        };
+
+        let room_id = room.room_id().as_str();
+        // The lock is released before anything is awaited; a guard held across an await
+        // makes the handler future !Send.
+        let users = {
+            let connection = match self.conn.lock() {
+                Ok(connection) => connection,
+                Err(_) => {
+                    error!("Database mutex is poisoned");
+                    return;
+                }
+            };
+            users_with_room_data(&connection, room_id)
+        };
+        let present: Vec<i32> = match users {
+            Ok(users) => users
+                .into_iter()
+                .filter(|user| members.contains(&(user.name.clone(), user.url.clone())))
+                .map(|user| user.user_id)
+                .collect(),
+            Err(error) => {
+                error!(room_id, %error, "Unable to load the users of the room");
+                send_message(room, notice_plain("Failed to set the scores")).await;
+                return;
+            }
+        };
+
+        let changed = match set_social_credit_for_users(&self.conn, room_id, &present, value) {
+            Ok(changed) => changed,
+            Err(error) => {
+                error!(room_id, %error, "Unable to set the social credit scores");
+                send_message(room, notice_plain("Failed to set the scores")).await;
+                return;
+            }
+        };
+
+        info!(room_id, changed, value, admin = %sender.name, "Scores set by the admin");
+
+        let who = if changed == 1 {
+            "1 user".to_owned()
+        } else {
+            format!("{changed} users")
+        };
+        let plain = format!(
+            "{} set the Social Credit Score of {} to {}",
+            sender.name, who, value
+        );
+        let html = format!(
+            "<b>{}</b> set the Social Credit Score of <b>{}</b> to <b>{}</b>",
+            escape_html(&sender.name),
+            who,
+            value
+        );
+        send_message(room, notice_html(plain, html)).await;
+    }
+
     fn is_user_the_bot(&self, user_id: &UserId) -> bool {
         user_id == self.own_user_id
     }
@@ -639,7 +815,7 @@ const COMMANDS: [(&str, &str); 3] = [
     ),
 ];
 
-const ADMIN_COMMANDS: [(&str, &str); 4] = [
+const ADMIN_COMMANDS: [(&str, &str); 6] = [
     (
         "!register_emoji <emoji> <social_credit>",
         "Register an emoji with a social credit score for the current room. Example: !register_emoji 😑 -25",
@@ -647,6 +823,14 @@ const ADMIN_COMMANDS: [(&str, &str); 4] = [
     (
         "!unregister_emoji <emoji>",
         "Remove a registered emoji from the current room. Example: !unregister_emoji 😑",
+    ),
+    (
+        "!set_score <user> <social_credit>",
+        "Set one user's social credit score in the current room. Example: !set_score alice 250",
+    ),
+    (
+        "!set_score_all <social_credit>",
+        "Set the social credit score of everybody in the current room who has one. Example: !set_score_all 250",
     ),
     (
         "!activate",
@@ -818,6 +1002,8 @@ mod tests {
         assert!(everyone.contains("- !list:"));
         assert!(!everyone.contains("!register_emoji"));
         assert!(admin.contains("- !register_emoji <emoji> <social_credit>:"));
+        assert!(admin.contains("- !set_score <user> <social_credit>:"));
+        assert!(admin.contains("- !set_score_all <social_credit>:"));
         assert!(admin.contains("- !activate:"));
         assert!(admin.contains("- !deactivate:"));
 

@@ -244,12 +244,20 @@ was idle needs the same counters as awarding points does.
 | `!list_emoji` | everyone | Registered emojis and their score change. |
 | `!register_emoji <emoji> <score>` | admin | Register an emoji, e.g. `!register_emoji 😑 -25`. |
 | `!unregister_emoji <emoji>` | admin | Remove a registered emoji again. |
+| `!set_score <user> <score>` | admin | Set one user's score in the current room, e.g. `!set_score alice 250`. |
+| `!set_score_all <score>` | admin | Set the score of everybody in the current room who has one. |
 | `!activate` | admin | Switch the bot on in the current room. |
 | `!deactivate` | admin | Switch it off again; scores and emojis are kept. |
 
 `-` and `_` are interchangeable in every command, and `!list_emoji`, `!list-emoji`,
 `!list_emojis` and `!list-emojis` all work. `!help` lists the admin commands under their own
 heading.
+
+`<user>` is a localpart (`alice`, resolved against the bot's own server) or a full Matrix id
+(`@alice:example.org`), the same as `ADMIN_USERNAME`. The user has to be in the room; a member
+who has no score yet gets one. `!set_score_all` reaches the same people `!list` shows --
+members with a score -- and leaves everybody who left the room alone, so a return does not
+start from a value set while they were away. Both are announced in the room.
 
 ### Activating a room
 

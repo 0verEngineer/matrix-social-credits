@@ -260,7 +260,7 @@ pub async fn get_user_list_answer(
 ///
 /// Returns `None` when the member list could not be obtained, so callers can tell "nobody is
 /// in the room" apart from "we do not know who is in the room".
-async fn current_room_members(room: &Room) -> Option<HashSet<(String, String)>> {
+pub async fn current_room_members(room: &Room) -> Option<HashSet<(String, String)>> {
     match room.members(RoomMemberships::JOIN).await {
         Ok(members) => Some(
             members

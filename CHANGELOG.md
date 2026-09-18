@@ -52,6 +52,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   marks every existing room as inactive, so after upgrading the admin has to `!activate` each
   room the bot should keep working in.
 - `!help` lists the admin commands under their own heading.
+- `!set_score <user> <score>` and `!set_score_all <score>` for the admin to put scores at a
+  value by hand, per user or for everybody in the room who has one.
 - A weekly activity payout. Messages and images are counted per user and per room and turned
   into social credit on a schedule — by default Sunday at 20:00, one point per message and
   five per image — announced in the room in a single, length-capped message. Reactions,

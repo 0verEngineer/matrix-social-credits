@@ -181,6 +181,54 @@ pub fn add_social_credit_on(
     )
 }
 
+/// Overwrite a user's score in one room, returning the value it had before.
+///
+/// The admin's `!set_score`. The value comes in as an `i32` already, so unlike
+/// [`add_social_credit_on`] there is nothing to clamp.
+pub fn set_social_credit(
+    conn: &Arc<Mutex<Connection>>,
+    user_id: i32,
+    room_id: &str,
+    value: i32,
+) -> Result<i32, Error> {
+    let connection = conn.lock().unwrap();
+    let previous: i32 = connection.query_row(
+        "SELECT social_credit FROM user_room_data WHERE user_id = ?1 AND room_id = ?2",
+        params![user_id, room_id],
+        |row| row.get(0),
+    )?;
+    connection.execute(
+        "UPDATE user_room_data SET social_credit = ?1 WHERE user_id = ?2 AND room_id = ?3",
+        params![value, user_id, room_id],
+    )?;
+    Ok(previous)
+}
+
+/// Overwrite the score of several users in one room, all of them or none.
+///
+/// Returns how many rows were changed. Users without a row in this room are skipped, not
+/// created: the admin's `!set_score_all` is meant for the people who already have a score.
+pub fn set_social_credit_for_users(
+    conn: &Arc<Mutex<Connection>>,
+    room_id: &str,
+    user_ids: &[i32],
+    value: i32,
+) -> Result<usize, Error> {
+    let mut connection = conn.lock().unwrap();
+    let transaction = connection.transaction()?;
+
+    let mut changed = 0;
+    for user_id in user_ids {
+        changed += transaction.execute(
+            "UPDATE user_room_data SET social_credit = ?1 WHERE user_id = ?2 AND room_id = ?3",
+            params![value, user_id, room_id],
+        )?;
+    }
+
+    transaction.commit()?;
+    Ok(changed)
+}
+
 /// Everybody who has a score in this room.
 ///
 /// The activity payout needs the full list, not just the people who did something: whoever is
@@ -241,7 +289,7 @@ mod tests {
 
     use super::{
         UserRoomData, add_social_credit, find_user_room_data_by_user_id_and_room_id,
-        insert_user_room_data,
+        insert_user_room_data, set_social_credit, set_social_credit_for_users,
     };
     use crate::data::user_reaction::insert_user_reaction;
     use crate::test_support::test_db;
@@ -441,6 +489,61 @@ mod tests {
             add_social_credit(&db, room_data.user_id, ROOM, -300).unwrap(),
             -50
         );
+    }
+
+    #[test]
+    fn setting_a_score_reports_the_old_value() {
+        let db = test_db();
+        let room_data = seed(&db);
+
+        assert_eq!(
+            set_social_credit(&db, room_data.user_id, ROOM, -40).unwrap(),
+            250
+        );
+
+        let reloaded = find_user_room_data_by_user_id_and_room_id(&db, 1, ROOM).unwrap();
+        assert_eq!(reloaded.social_credit, -40);
+    }
+
+    #[test]
+    fn setting_the_score_of_a_missing_row_is_an_error() {
+        let db = test_db();
+        seed(&db);
+
+        assert!(set_social_credit(&db, 1, "!other:example.org", 10).is_err());
+    }
+
+    /// Only rows that exist are touched; an id without a row in the room is skipped, and
+    /// the count says how many were actually changed.
+    #[test]
+    fn setting_several_scores_skips_users_without_a_row() {
+        let db = test_db();
+        seed(&db);
+        {
+            let conn = db.lock().unwrap();
+            conn.execute_batch(
+                "INSERT INTO user (id, name, url, user_type) VALUES (2,'bob','example.org',0), (3,'carol','example.org',0);
+                 INSERT INTO user_room_data (user_id, room_id, social_credit) VALUES (2, '!room:example.org', 300);",
+            )
+            .unwrap();
+        }
+
+        let changed = set_social_credit_for_users(&db, ROOM, &[1, 2, 3], 100).unwrap();
+
+        assert_eq!(changed, 2, "carol has no score here and gets none");
+        assert_eq!(
+            find_user_room_data_by_user_id_and_room_id(&db, 1, ROOM)
+                .unwrap()
+                .social_credit,
+            100
+        );
+        assert_eq!(
+            find_user_room_data_by_user_id_and_room_id(&db, 2, ROOM)
+                .unwrap()
+                .social_credit,
+            100
+        );
+        assert!(find_user_room_data_by_user_id_and_room_id(&db, 3, ROOM).is_err());
     }
 
     #[test]
