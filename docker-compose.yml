@@ -32,9 +32,19 @@ services:
       # Client state store and saved session
       STORE_PATH: /data/store
 
-      # Weekly activity payout. Set all of these to 0 to switch it off.
+      # Weekly activity payout. Set all of the point values to 0 to switch it off --
+      # ACTIVITY_VIDEO_MAX_POINTS does not count, a cap is a limit rather than a reason to
+      # count. Voice messages count as ordinary messages.
       # ACTIVITY_POINTS_PER_MESSAGE: 1
       # ACTIVITY_POINTS_PER_IMAGE: 5
+      # A video is worth ACTIVITY_POINTS_PER_VIDEO plus
+      # ACTIVITY_POINTS_PER_VIDEO_10_SECONDS for every full ten seconds of it, and never more
+      # than ACTIVITY_VIDEO_MAX_POINTS in total -- with these values it stops earning at 3:40
+      # minutes. The duration comes from the sending client and nobody checks it, which is
+      # what the cap is for.
+      # ACTIVITY_POINTS_PER_VIDEO: 3
+      # ACTIVITY_POINTS_PER_VIDEO_10_SECONDS: 1
+      # ACTIVITY_VIDEO_MAX_POINTS: 25
       # Deducted from anybody who spends the whole period in the room without sending anything
       # ACTIVITY_INACTIVITY_PENALTY: 50
       # ACTIVITY_PAYOUT_DAY: sunday
