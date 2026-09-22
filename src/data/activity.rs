@@ -12,6 +12,12 @@ use tracing::error;
 pub enum ActivityKind {
     Message,
     Image,
+    /// `seconds` is the duration already capped by the caller, see
+    /// [`crate::utils::payout::PayoutConfig::max_countable_video_seconds`]. A video whose
+    /// event carries no duration counts with `0`.
+    Video {
+        seconds: i32,
+    },
 }
 
 /// One user's activity in one room since the last payout.
@@ -26,22 +32,37 @@ pub struct Activity {
     pub url: String,
     pub messages: i32,
     pub images: i32,
+    pub videos: i32,
+    /// Seconds of video, summed over the period and already capped per video.
+    pub video_seconds: i32,
 }
 
-/// Count one message or image for this user in this room.
+/// Count one message, image or video for this user in this room.
 ///
 /// A single statement, so two events arriving at the same time cannot lose a count the way a
-/// read-modify-write would.
+/// read-modify-write would. Every branch binds both parameters, so there is one `execute`
+/// rather than one per kind; for a message or an image the second one is simply zero.
 pub fn record_activity(conn: &Arc<Mutex<Connection>>, user_room_data_id: i32, kind: ActivityKind) {
-    let sql = match kind {
-        ActivityKind::Message => {
-            "INSERT INTO activity (user_room_data_id, messages, images) VALUES (?1, 1, 0) \
-             ON CONFLICT(user_room_data_id) DO UPDATE SET messages = messages + 1"
-        }
-        ActivityKind::Image => {
-            "INSERT INTO activity (user_room_data_id, messages, images) VALUES (?1, 0, 1) \
-             ON CONFLICT(user_room_data_id) DO UPDATE SET images = images + 1"
-        }
+    let (sql, seconds) = match kind {
+        ActivityKind::Message => (
+            "INSERT INTO activity (user_room_data_id, messages, images, videos, video_seconds) \
+             VALUES (?1, 1, 0, 0, ?2) \
+             ON CONFLICT(user_room_data_id) DO UPDATE SET messages = messages + 1",
+            0,
+        ),
+        ActivityKind::Image => (
+            "INSERT INTO activity (user_room_data_id, messages, images, videos, video_seconds) \
+             VALUES (?1, 0, 1, 0, ?2) \
+             ON CONFLICT(user_room_data_id) DO UPDATE SET images = images + 1",
+            0,
+        ),
+        ActivityKind::Video { seconds } => (
+            "INSERT INTO activity (user_room_data_id, messages, images, videos, video_seconds) \
+             VALUES (?1, 0, 0, 1, ?2) \
+             ON CONFLICT(user_room_data_id) DO UPDATE SET videos = videos + 1, \
+                 video_seconds = video_seconds + ?2",
+            seconds.max(0),
+        ),
     };
 
     let connection = match conn.lock() {
@@ -52,7 +73,7 @@ pub fn record_activity(conn: &Arc<Mutex<Connection>>, user_room_data_id: i32, ki
         }
     };
 
-    if let Err(error) = connection.execute(sql, params![user_room_data_id]) {
+    if let Err(error) = connection.execute(sql, params![user_room_data_id, seconds]) {
         error!(%error, ?kind, "Failed to record activity");
     }
 }
@@ -60,11 +81,11 @@ pub fn record_activity(conn: &Arc<Mutex<Connection>>, user_room_data_id: i32, ki
 /// Everything counted since the last payout, ordered by room.
 pub fn pending_activity(conn: &Connection) -> Result<Vec<Activity>, Error> {
     let mut stmt = conn.prepare(
-        "SELECT d.room_id, u.id, u.name, u.url, a.messages, a.images \
+        "SELECT d.room_id, u.id, u.name, u.url, a.messages, a.images, a.videos, a.video_seconds \
            FROM activity a \
            JOIN user_room_data d ON d.id = a.user_room_data_id \
            JOIN user u ON u.id = d.user_id \
-          WHERE a.messages > 0 OR a.images > 0 \
+          WHERE a.messages > 0 OR a.images > 0 OR a.videos > 0 \
           ORDER BY d.room_id",
     )?;
 
@@ -76,6 +97,8 @@ pub fn pending_activity(conn: &Connection) -> Result<Vec<Activity>, Error> {
             url: row.get(3)?,
             messages: row.get(4)?,
             images: row.get(5)?,
+            videos: row.get(6)?,
+            video_seconds: row.get(7)?,
         })
     })?;
 
@@ -145,6 +168,44 @@ mod tests {
         assert_eq!(pending[0].images, 1);
         assert_eq!(pending[0].name, "alice");
         assert_eq!(pending[0].room_id, "!r");
+    }
+
+    /// A video carries its (already capped) duration; the seconds add up over the period.
+    #[test]
+    fn counts_videos_with_their_duration() {
+        let db = test_db();
+        let room_data_id = {
+            let conn = db.lock().unwrap();
+            seed(&conn, "alice", "!r")
+        };
+
+        record_activity(&db, room_data_id, ActivityKind::Video { seconds: 90 });
+        record_activity(&db, room_data_id, ActivityKind::Video { seconds: 30 });
+        // A video whose event carried no duration.
+        record_activity(&db, room_data_id, ActivityKind::Video { seconds: 0 });
+        record_activity(&db, room_data_id, ActivityKind::Message);
+
+        let conn = db.lock().unwrap();
+        let pending = pending_activity(&conn).unwrap();
+        assert_eq!(pending[0].videos, 3);
+        assert_eq!(pending[0].video_seconds, 120);
+        assert_eq!(pending[0].messages, 1);
+        assert_eq!(pending[0].images, 0);
+    }
+
+    /// Somebody who only sent videos still has to turn up in the payout.
+    #[test]
+    fn a_period_of_nothing_but_videos_is_pending() {
+        let db = test_db();
+        let room_data_id = {
+            let conn = db.lock().unwrap();
+            seed(&conn, "alice", "!r")
+        };
+
+        record_activity(&db, room_data_id, ActivityKind::Video { seconds: 10 });
+
+        let conn = db.lock().unwrap();
+        assert_eq!(pending_activity(&conn).unwrap().len(), 1);
     }
 
     #[test]

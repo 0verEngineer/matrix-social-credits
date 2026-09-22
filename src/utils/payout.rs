@@ -42,6 +42,14 @@ const MIN_PENALTY_PERIOD_HOURS: i64 = 84;
 pub struct PayoutConfig {
     pub points_per_message: i32,
     pub points_per_image: i32,
+    /// Awarded for a video regardless of how long it is.
+    pub points_per_video: i32,
+    /// Awarded on top, for every full ten seconds of video.
+    pub points_per_video_10_seconds: i32,
+    /// The most a single video can be worth, the base points included. It is what keeps a
+    /// forged duration -- the length comes from the sender's client and is not checked by
+    /// anybody -- from being worth anything.
+    pub video_max_points: i32,
     /// Deducted from everybody who was in the room the whole period without sending
     /// anything. A positive number; `0` switches the penalty off.
     pub inactivity_penalty: i32,
@@ -55,7 +63,37 @@ impl PayoutConfig {
     /// The penalty counts here too: deciding who was idle needs the same counters as awarding
     /// points does.
     pub fn is_enabled(&self) -> bool {
-        self.points_per_message != 0 || self.points_per_image != 0 || self.inactivity_penalty != 0
+        self.points_per_message != 0
+            || self.points_per_image != 0
+            || self.points_per_video != 0
+            || self.points_per_video_10_seconds != 0
+            || self.inactivity_penalty != 0
+    }
+
+    /// How much of a single video's duration is worth recording, in seconds.
+    ///
+    /// Anything past this could not be paid for anyway, because [`video_max_points`] caps the
+    /// clip. Cutting it off when the event arrives rather than when the period is settled
+    /// keeps a claimed duration of four hours from sitting in the database until somebody
+    /// raises the cap -- and keeps the sum of a period inside an `i32`.
+    ///
+    /// [`video_max_points`]: PayoutConfig::video_max_points
+    pub fn max_countable_video_seconds(&self) -> i32 {
+        if self.points_per_video_10_seconds <= 0 {
+            return 0;
+        }
+
+        let payable = i64::from(self.video_max_points) - i64::from(self.points_per_video);
+        if payable <= 0 {
+            return 0;
+        }
+
+        // The number of ten-second blocks that still fit under the cap, rounded up so the
+        // block that reaches it is not cut in half. `div_ceil` for signed integers is not
+        // stable yet; both operands are positive here.
+        let per_block = i64::from(self.points_per_video_10_seconds);
+        let blocks = (payable + per_block - 1) / per_block;
+        blocks.saturating_mul(10).clamp(0, i64::from(i32::MAX)) as i32
     }
 }
 
@@ -66,6 +104,9 @@ pub struct PayoutEntry {
     pub points: i32,
     pub messages: i32,
     pub images: i32,
+    pub videos: i32,
+    /// Seconds of video over the whole period, for the announcement.
+    pub video_seconds: i32,
 }
 
 /// What one room's period came to.
@@ -398,12 +439,13 @@ fn idle_members(
 }
 
 fn to_entry(activity: &Activity, config: PayoutConfig) -> Option<PayoutEntry> {
-    // Saturating throughout: a pathological configuration must not panic a background task.
-    let points = activity
-        .messages
-        .saturating_mul(config.points_per_message)
-        .saturating_add(activity.images.saturating_mul(config.points_per_image));
+    // i64 throughout and clamped once at the end: a pathological configuration must not panic
+    // a background task.
+    let points = i64::from(activity.messages) * i64::from(config.points_per_message)
+        + i64::from(activity.images) * i64::from(config.points_per_image)
+        + video_points(activity.videos, activity.video_seconds, config);
 
+    let points = points.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
     if points == 0 {
         return None;
     }
@@ -413,7 +455,33 @@ fn to_entry(activity: &Activity, config: PayoutConfig) -> Option<PayoutEntry> {
         points,
         messages: activity.messages,
         images: activity.images,
+        videos: activity.videos,
+        video_seconds: activity.video_seconds,
     })
+}
+
+/// What a period's videos are worth: one base rate per clip plus their length, and never
+/// more than the cap allows for that many clips.
+///
+/// The seconds are divided once, over the whole period rather than per video. That is what
+/// the stored counters allow -- they are sums, not a list of clips -- and it is the more
+/// generous reading: two nine-second clips are worth the ten-second block they add up to.
+/// The cap is applied to the total for the same reason, which also keeps it honest when
+/// `video_max_points` is lowered in the middle of a period, after the durations were already
+/// recorded under the old one.
+fn video_points(videos: i32, seconds: i32, config: PayoutConfig) -> i64 {
+    if videos <= 0 {
+        return 0;
+    }
+
+    let videos = i64::from(videos);
+    let blocks = i64::from(seconds.max(0)) / 10;
+
+    let earned = videos * i64::from(config.points_per_video)
+        + blocks * i64::from(config.points_per_video_10_seconds);
+    let ceiling = videos * i64::from(config.video_max_points);
+
+    earned.min(ceiling)
 }
 
 /// Build the announcement.
@@ -537,16 +605,37 @@ fn summarise(earners: usize, earned: i32, idle: usize, lost: i32) -> String {
     }
 }
 
-/// "23 messages, 3 images", leaving out whichever half is zero.
+/// "23 messages, 3 images, 2 videos (3m 40s)", leaving out whichever part is zero.
 fn describe(entry: &PayoutEntry) -> String {
-    let mut parts = Vec::with_capacity(2);
+    let mut parts = Vec::with_capacity(3);
     if entry.messages > 0 {
         parts.push(plural(entry.messages, "message", "messages"));
     }
     if entry.images > 0 {
         parts.push(plural(entry.images, "image", "images"));
     }
+    if entry.videos > 0 {
+        let videos = plural(entry.videos, "video", "videos");
+        // A video whose event carried no duration contributes nothing here, so a period of
+        // those alone says just "2 videos" rather than "2 videos (0s)".
+        parts.push(match entry.video_seconds {
+            seconds if seconds > 0 => format!("{videos} ({})", format_duration(seconds)),
+            _ => videos,
+        });
+    }
     parts.join(", ")
+}
+
+/// "40s", "3m", "3m 40s".
+fn format_duration(seconds: i32) -> String {
+    let minutes = seconds / 60;
+    let rest = seconds % 60;
+
+    match (minutes, rest) {
+        (0, _) => format!("{rest}s"),
+        (_, 0) => format!("{minutes}m"),
+        _ => format!("{minutes}m {rest}s"),
+    }
 }
 
 fn plural(count: i32, singular: &str, plural: &str) -> String {
@@ -601,6 +690,9 @@ mod payout_tests {
         PayoutConfig {
             points_per_message: 1,
             points_per_image: 5,
+            points_per_video: 3,
+            points_per_video_10_seconds: 1,
+            video_max_points: 25,
             inactivity_penalty: 0,
             max_entries: 10,
         }
@@ -637,6 +729,20 @@ mod payout_tests {
             |r| r.get(0),
         )
         .unwrap()
+    }
+
+    /// An empty period for `name`, to be filled in with `..activity_of("alice")`.
+    fn activity_of(name: &str) -> Activity {
+        Activity {
+            room_id: ROOM.to_owned(),
+            user_id: 1,
+            name: name.to_owned(),
+            url: "example.org".to_owned(),
+            messages: 0,
+            images: 0,
+            videos: 0,
+            video_seconds: 0,
+        }
     }
 
     fn score(conn: &Connection, name: &str, room: &str) -> i32 {
@@ -679,6 +785,33 @@ mod payout_tests {
             pending_activity(&conn).unwrap().is_empty(),
             "the period has to start over"
         );
+    }
+
+    /// Videos go through the same settlement as everything else, counters included.
+    #[test]
+    fn videos_are_paid_out_and_their_counters_cleared() {
+        let db = test_db();
+        let alice = {
+            let conn = db.lock().unwrap();
+            seed(&conn, "alice", ROOM)
+        };
+
+        record_activity(&db, alice, ActivityKind::Video { seconds: 95 });
+        record_activity(&db, alice, ActivityKind::Message);
+
+        let announcements = payout(&db, &roster(ROOM, &["alice"]), config());
+
+        let entry = &announcements[0].1.earners[0];
+        assert_eq!(
+            entry.points, 13,
+            "1 message, plus 3 for the clip and 9 blocks"
+        );
+        assert_eq!(entry.videos, 1);
+        assert_eq!(entry.video_seconds, 95);
+
+        let conn = db.lock().unwrap();
+        assert_eq!(score(&conn, "alice", ROOM), 263);
+        assert!(pending_activity(&conn).unwrap().is_empty());
     }
 
     /// Running twice in a row must not pay anybody a second time.
@@ -802,19 +935,151 @@ mod payout_tests {
         let config = PayoutConfig {
             points_per_message: i32::MAX,
             points_per_image: i32::MAX,
-            inactivity_penalty: 0,
-            max_entries: 10,
+            points_per_video: i32::MAX,
+            points_per_video_10_seconds: i32::MAX,
+            video_max_points: i32::MAX,
+            ..config()
         };
         let activity = Activity {
-            room_id: "!r".to_owned(),
-            user_id: 1,
-            name: "alice".to_owned(),
-            url: "example.org".to_owned(),
             messages: 1000,
             images: 1000,
+            videos: 1000,
+            video_seconds: i32::MAX,
+            ..activity_of("alice")
         };
 
         assert_eq!(to_entry(&activity, config).unwrap().points, i32::MAX);
+    }
+
+    /// One clip of every length, against the configured defaults: 3 points for the clip and
+    /// one more per full ten seconds, up to 25 for the clip as a whole.
+    #[test]
+    fn a_video_is_worth_its_length_up_to_the_cap() {
+        let cases = [
+            (0, 3, "no duration in the event"),
+            (5, 3, "less than a block"),
+            (10, 4, "one block"),
+            (95, 12, "nine blocks, the rest is dropped"),
+            (220, 25, "exactly at the cap"),
+            (600, 25, "past it"),
+        ];
+
+        for (seconds, expected, what) in cases {
+            let activity = Activity {
+                videos: 1,
+                video_seconds: seconds,
+                ..activity_of("alice")
+            };
+            let entry = to_entry(&activity, config()).expect("a video is worth something");
+            assert_eq!(entry.points, expected, "{what}");
+        }
+    }
+
+    /// The seconds are summed over the period and divided once, so remainders are not lost
+    /// per clip. The cap then applies to the total of that many clips.
+    #[test]
+    fn several_videos_share_one_division_and_one_cap() {
+        let two_short = Activity {
+            videos: 2,
+            video_seconds: 18,
+            ..activity_of("alice")
+        };
+        assert_eq!(
+            to_entry(&two_short, config()).unwrap().points,
+            7,
+            "2 x 3 base, plus the one block the two nine-second clips add up to"
+        );
+
+        let two_long = Activity {
+            videos: 2,
+            video_seconds: 10_000,
+            ..activity_of("alice")
+        };
+        assert_eq!(
+            to_entry(&two_long, config()).unwrap().points,
+            50,
+            "two clips can never be worth more than twice the cap"
+        );
+    }
+
+    /// Durations are recorded under whatever cap was configured at the time. Lowering it
+    /// mid-period must still hold at the payout, which is why the ceiling is applied there
+    /// as well and not only when the event arrives.
+    #[test]
+    fn lowering_the_cap_mid_period_still_holds() {
+        let recorded_under_the_old_cap = Activity {
+            videos: 1,
+            video_seconds: 220,
+            ..activity_of("alice")
+        };
+        let config = PayoutConfig {
+            video_max_points: 10,
+            ..config()
+        };
+
+        assert_eq!(
+            to_entry(&recorded_under_the_old_cap, config)
+                .unwrap()
+                .points,
+            10
+        );
+    }
+
+    /// How much of a clip is worth writing down, derived from the cap.
+    #[test]
+    fn the_recordable_duration_follows_the_cap() {
+        assert_eq!(
+            config().max_countable_video_seconds(),
+            220,
+            "(25 - 3) blocks of ten seconds"
+        );
+
+        assert_eq!(
+            PayoutConfig {
+                points_per_video_10_seconds: 5,
+                ..config()
+            }
+            .max_countable_video_seconds(),
+            50,
+            "five points a block reaches the cap five times sooner"
+        );
+        assert_eq!(
+            PayoutConfig {
+                points_per_video_10_seconds: 3,
+                ..config()
+            }
+            .max_countable_video_seconds(),
+            80,
+            "the block that reaches the cap counts whole"
+        );
+        assert_eq!(
+            PayoutConfig {
+                points_per_video_10_seconds: 0,
+                ..config()
+            }
+            .max_countable_video_seconds(),
+            0,
+            "length is worth nothing, so no duration needs recording"
+        );
+        assert_eq!(
+            PayoutConfig {
+                video_max_points: 3,
+                ..config()
+            }
+            .max_countable_video_seconds(),
+            0,
+            "the base points already reach the cap"
+        );
+        assert_eq!(
+            PayoutConfig {
+                points_per_video_10_seconds: 1,
+                video_max_points: i32::MAX,
+                ..config()
+            }
+            .max_countable_video_seconds(),
+            i32::MAX,
+            "an absurd cap must not overflow the seconds"
+        );
     }
 
     #[test]
@@ -989,7 +1254,15 @@ mod tests {
             points,
             messages,
             images,
+            videos: 0,
+            video_seconds: 0,
         }
+    }
+
+    fn with_videos(mut entry: PayoutEntry, videos: i32, video_seconds: i32) -> PayoutEntry {
+        entry.videos = videos;
+        entry.video_seconds = video_seconds;
+        entry
     }
 
     /// A room where everybody was active.
@@ -1015,9 +1288,9 @@ mod tests {
     fn preview() {
         let payout = mixed(
             vec![
-                entry("julian", 47, 32, 3),
+                with_videos(entry("julian", 72, 32, 3), 1, 220),
                 entry("marie", 38, 23, 3),
-                entry("tobias", 21, 16, 1),
+                with_videos(entry("tobias", 27, 16, 1), 2, 65),
                 entry("lena", 12, 12, 0),
                 entry("simon", 5, 0, 1),
                 entry("nina", 4, 4, 0),
@@ -1188,6 +1461,9 @@ mod tests {
         let config = PayoutConfig {
             points_per_message: 0,
             points_per_image: 5,
+            points_per_video: 3,
+            points_per_video_10_seconds: 1,
+            video_max_points: 25,
             inactivity_penalty: 0,
             max_entries: 10,
         };
@@ -1198,40 +1474,99 @@ mod tests {
             url: "example.org".to_owned(),
             messages: 20,
             images: 0,
+            videos: 0,
+            video_seconds: 0,
         };
 
         assert!(to_entry(&activity, config).is_none());
     }
 
     #[test]
-    fn both_values_at_zero_switches_the_feature_off() {
-        assert!(
-            !PayoutConfig {
-                points_per_message: 0,
-                points_per_image: 0,
-                inactivity_penalty: 0,
-                max_entries: 10
-            }
-            .is_enabled()
-        );
+    fn every_value_at_zero_switches_the_feature_off() {
+        let off = PayoutConfig {
+            points_per_message: 0,
+            points_per_image: 0,
+            points_per_video: 0,
+            points_per_video_10_seconds: 0,
+            video_max_points: 25,
+            inactivity_penalty: 0,
+            max_entries: 10,
+        };
+
+        assert!(!off.is_enabled());
         assert!(
             PayoutConfig {
                 points_per_message: 1,
-                points_per_image: 0,
-                inactivity_penalty: 0,
-                max_entries: 10
+                ..off
             }
             .is_enabled()
         );
         assert!(
             PayoutConfig {
-                points_per_message: 0,
-                points_per_image: 0,
+                points_per_video: 3,
+                ..off
+            }
+            .is_enabled(),
+            "videos alone are enough"
+        );
+        assert!(
+            PayoutConfig {
+                points_per_video_10_seconds: 1,
+                ..off
+            }
+            .is_enabled(),
+            "paying only for length is a configuration too"
+        );
+        assert!(
+            PayoutConfig {
                 inactivity_penalty: 50,
-                max_entries: 10
+                ..off
             }
             .is_enabled(),
             "the penalty alone still needs the counters"
         );
+        assert!(
+            !PayoutConfig {
+                video_max_points: 100,
+                ..off
+            }
+            .is_enabled(),
+            "a cap is a limit, not a reason to count"
+        );
+    }
+
+    #[test]
+    fn videos_are_named_with_their_running_time() {
+        let answer = format_payout(
+            &earned(vec![with_videos(entry("alice", 31, 12, 1), 2, 220)]),
+            10,
+        );
+
+        assert!(
+            answer
+                .text
+                .contains("1. alice: +31 (12 messages, 1 image, 2 videos (3m 40s))"),
+            "unexpected line: {}",
+            answer.text
+        );
+    }
+
+    /// Videos whose events carried no duration have nothing to show in brackets.
+    #[test]
+    fn videos_without_a_duration_are_just_counted() {
+        let answer = format_payout(
+            &earned(vec![with_videos(entry("alice", 6, 0, 0), 2, 0)]),
+            10,
+        );
+
+        assert!(answer.text.contains("1. alice: +6 (2 videos)"));
+    }
+
+    #[test]
+    fn a_running_time_reads_naturally() {
+        assert_eq!(format_duration(9), "9s");
+        assert_eq!(format_duration(60), "1m");
+        assert_eq!(format_duration(220), "3m 40s");
+        assert_eq!(format_duration(0), "0s");
     }
 }

@@ -33,8 +33,11 @@ pub struct EventHandler {
     initial_social_credit: i32,
     reaction_period_minutes: i32,
     reaction_limit: i32,
-    /// Whether messages and images are counted towards the weekly payout.
+    /// Whether messages, images and videos are counted towards the weekly payout.
     activity_enabled: bool,
+    /// How much of a video's duration is worth recording, see
+    /// [`crate::utils::payout::PayoutConfig::max_countable_video_seconds`].
+    max_video_seconds: i32,
 }
 
 impl EventHandler {
@@ -45,6 +48,7 @@ impl EventHandler {
         reaction_period_minutes: i32,
         reaction_limit: i32,
         activity_enabled: bool,
+        max_video_seconds: i32,
     ) -> Self {
         EventHandler {
             conn,
@@ -53,6 +57,7 @@ impl EventHandler {
             reaction_period_minutes,
             reaction_limit,
             activity_enabled,
+            max_video_seconds,
         }
     }
 
@@ -261,12 +266,23 @@ impl EventHandler {
             if let events::AnyMessageLikeEventContent::RoomMessage(content) =
                 event.original_content().unwrap()
             {
-                // Text and emotes count as messages, images as images. Everything else --
-                // video, audio, files, locations, notices -- is left alone rather than
-                // guessed at; reactions never reach this branch at all.
-                let activity = match content.msgtype {
-                    MessageType::Text(..) | MessageType::Emote(..) => Some(ActivityKind::Message),
+                // Text, emotes and audio count as messages, images as images, and a video by
+                // the clip plus its length. Everything else -- files, locations, notices --
+                // is left alone rather than guessed at; reactions never reach this branch at
+                // all. Audio is deliberately a plain message: a voice note is a message that
+                // happens to be spoken, and paying it by the second would reward holding the
+                // button down.
+                let activity = match &content.msgtype {
+                    MessageType::Text(..) | MessageType::Emote(..) | MessageType::Audio(..) => {
+                        Some(ActivityKind::Message)
+                    }
                     MessageType::Image(..) => Some(ActivityKind::Image),
+                    MessageType::Video(video) => Some(ActivityKind::Video {
+                        seconds: counted_video_seconds(
+                            video.info.as_ref().and_then(|info| info.duration),
+                            self.max_video_seconds,
+                        ),
+                    }),
                     _ => None,
                 };
                 if activity.is_none() {
@@ -898,6 +914,22 @@ fn help_answer(room_is_active: bool) -> HtmlAndTextAnswer {
     HtmlAndTextAnswer { text, html }
 }
 
+/// How many seconds of a video are worth recording.
+///
+/// The duration is metadata the sending client put into the event. Nobody checks it, so it
+/// is capped here rather than believed: without a cap a claimed four hours would be stored,
+/// and a later change to the configuration could turn it into points. A video whose event
+/// carries no duration at all -- some clients and most bridges send none -- counts as zero
+/// seconds, so it is still worth its base points and nothing more.
+fn counted_video_seconds(duration: Option<std::time::Duration>, max_seconds: i32) -> i32 {
+    let Some(duration) = duration else {
+        return 0;
+    };
+
+    let seconds = duration.as_secs().min(i32::MAX as u64) as i32;
+    seconds.clamp(0, max_seconds.max(0))
+}
+
 /// The body of a plain text message, or `None` for anything that is not one.
 ///
 /// Edits are not messages here either -- the original was already handled when it arrived,
@@ -942,7 +974,8 @@ mod tests {
     use matrix_sdk::ruma::events::AnySyncTimelineEvent;
     use matrix_sdk::ruma::serde::Raw;
 
-    use super::{annotated_event_author, help_answer, split_command};
+    use super::{annotated_event_author, counted_video_seconds, help_answer, split_command};
+    use std::time::Duration;
 
     /// A reaction points at a message. In an encrypted room the bot often cannot read that
     /// message -- it was sent before the bot's device existed, or its author does not share
@@ -1047,6 +1080,43 @@ mod tests {
 
         assert!(answer.html.contains("&lt;emoji&gt; &lt;social_credit&gt;"));
         assert!(!answer.html.contains("<emoji>"));
+    }
+
+    /// The duration is whatever the sending client wrote into the event; nobody checks it.
+    /// Without the cap a claimed four hours would be stored and could be turned into points
+    /// by a later change to the configuration.
+    #[test]
+    fn a_video_is_only_counted_up_to_the_cap() {
+        assert_eq!(
+            counted_video_seconds(Some(Duration::from_secs(90)), 220),
+            90
+        );
+        assert_eq!(
+            counted_video_seconds(Some(Duration::from_secs(220)), 220),
+            220
+        );
+        assert_eq!(
+            counted_video_seconds(Some(Duration::from_secs(4 * 60 * 60)), 220),
+            220
+        );
+    }
+
+    /// Some clients and most bridges send no duration at all. Such a video still counts as
+    /// one, it is just not worth anything for its length.
+    #[test]
+    fn a_video_without_a_duration_counts_as_zero_seconds() {
+        assert_eq!(counted_video_seconds(None, 220), 0);
+    }
+
+    /// Sub-second clips, and a configuration that pays nothing for length.
+    #[test]
+    fn odd_durations_and_caps_do_not_produce_nonsense() {
+        assert_eq!(
+            counted_video_seconds(Some(Duration::from_millis(400)), 220),
+            0
+        );
+        assert_eq!(counted_video_seconds(Some(Duration::from_secs(90)), 0), 0);
+        assert_eq!(counted_video_seconds(Some(Duration::MAX), 220), 220);
     }
 
     #[test]

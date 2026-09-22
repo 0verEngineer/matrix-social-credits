@@ -54,6 +54,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `!help` lists the admin commands under their own heading.
 - `!set_score <user> <score>` and `!set_score_all <score>` for the admin to put scores at a
   value by hand, per user or for everybody in the room who has one.
+- Videos count towards the weekly payout, by the clip and by their length:
+  `ACTIVITY_POINTS_PER_VIDEO` (3) for the clip, `ACTIVITY_POINTS_PER_VIDEO_10_SECONDS` (1)
+  for every full ten seconds, and at most `ACTIVITY_VIDEO_MAX_POINTS` (25) for one video —
+  the duration is written by the sending client and nobody checks it, so it is capped rather
+  than believed. A video without a duration in its event is worth the base points.
+- Voice messages count as ordinary messages. Previously neither they nor videos counted at
+  all.
 - A weekly activity payout. Messages and images are counted per user and per room and turned
   into social credit on a schedule — by default Sunday at 20:00, one point per message and
   five per image — announced in the room in a single, length-capped message. Reactions,

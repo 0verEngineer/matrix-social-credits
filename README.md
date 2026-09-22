@@ -224,15 +224,20 @@ if you are unsure.
 | `EVENT_RETENTION_DAYS` | `30` | How long the deduplication markers in the `event` table are kept. |
 | `ACTIVITY_POINTS_PER_MESSAGE` | `1` | Social credit per message in the weekly payout. `0` stops counting messages. |
 | `ACTIVITY_POINTS_PER_IMAGE` | `5` | Social credit per image in the weekly payout. `0` stops counting images. |
+| `ACTIVITY_POINTS_PER_VIDEO` | `3` | Social credit for a video, whatever its length. |
+| `ACTIVITY_POINTS_PER_VIDEO_10_SECONDS` | `1` | Added on top for every full ten seconds of video. |
+| `ACTIVITY_VIDEO_MAX_POINTS` | `25` | The most a single video can be worth, the base points included. |
 | `ACTIVITY_INACTIVITY_PENALTY` | `50` | Deducted from anybody who spends a whole period in a room without sending anything. `0` switches the penalty off. |
 | `ACTIVITY_PAYOUT_DAY` | `sunday` | Weekday of the payout, English name or three letter form. |
 | `ACTIVITY_PAYOUT_TIME` | `20:00` | Time of day of the payout, `HH:MM`. |
 | `ACTIVITY_PAYOUT_TIMEZONE` | `TZ`, else `UTC` | IANA time zone the day and time are read in, for example `Europe/Vienna`. |
 | `ACTIVITY_PAYOUT_MAX_ENTRIES` | `10` | How many people the payout message names before it summarises the rest. |
 
-Setting **all three** point values to `0` switches the weekly payout off completely: nothing is
-counted and no message is posted. The penalty counts as one of them, because working out who
-was idle needs the same counters as awarding points does.
+Setting **all** the point values to `0` — messages, images, videos, video seconds and the
+penalty — switches the weekly payout off completely: nothing is counted and no message is
+posted. The penalty counts as one of them, because working out who was idle needs the same
+counters as awarding points does. `ACTIVITY_VIDEO_MAX_POINTS` does not: a cap is a limit, not
+a reason to count.
 
 
 <!-- COMMANDS -->
@@ -287,12 +292,31 @@ React with a registered emoji to a message to change the score of the user who s
 Besides reactions, the bot rewards taking part at all — and charges for not taking part. It
 counts what everybody sends and settles up once a week.
 
-| Counted as a message | Counted as an image | Not counted |
-| --- | --- | --- |
-| text, emotes (`/me`) | images | reactions, videos, files, audio, locations, notices |
+| Counted as a message | Counted as an image | Counted as a video | Not counted |
+| --- | --- | --- | --- |
+| text, emotes (`/me`), voice messages | images | videos | reactions, files, locations, notices |
 
 Commands to the bot do not count either — asking for `!list` twenty times is not an
-achievement. Editing a message does not count a second time.
+achievement. Editing a message does not count a second time. A voice message is a plain
+message on purpose: it is a message that happens to be spoken, and paying it by the second
+would reward holding the button down.
+
+### What a video is worth
+
+`ACTIVITY_POINTS_PER_VIDEO` for the clip, plus `ACTIVITY_POINTS_PER_VIDEO_10_SECONDS` for
+every full ten seconds of it, and never more than `ACTIVITY_VIDEO_MAX_POINTS` for one video.
+With the defaults that is 3 points for a clip of any length, one more per ten seconds, and 25
+at most — so a video stops earning at 3:40 minutes.
+
+- **The length comes from the sender's client and is not checked by anybody.** That is what
+  the cap is for: a clip claiming to be four hours long is worth the same 25 points as one
+  that really is. Only as much of the duration as the cap could ever pay for is written down
+  at all.
+- **A video whose event carries no duration** — some clients and most bridges send none — is
+  worth its base points and nothing more.
+- **The seconds of a period are added up and divided once**, not per clip, so remainders are
+  not lost: two nine-second videos are worth the ten-second block they come to together. The
+  cap still holds, applied to the total of that many clips.
 
 At the configured time the counters are converted into points and added to everybody's score.
 Anybody who is in the room, already has a score there and sent **nothing** at all loses
@@ -302,12 +326,12 @@ Anybody who is in the room, already has a score there and sent **nothing** at al
 🧧 Weekly Social Credit
 
 1. alice: +38 (23 messages, 3 images)
-2. bob: +21 (16 messages, 1 image)
+2. bob: +28 (16 messages, 1 image, 2 videos (3m 40s))
 3. carol: +12 (12 messages)
 
 Idle: dave, erin — -50 each
 
-3 comrades earned 71 points, 2 idle comrades lost 100 points this period
+3 comrades earned 78 points, 2 idle comrades lost 100 points this period
 ```
 
 Beyond `ACTIVITY_PAYOUT_MAX_ENTRIES` people the list stops naming names and adds a line like

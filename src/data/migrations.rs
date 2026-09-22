@@ -13,7 +13,7 @@ use crate::utils::emoji_util::normalize_emoji;
 // migration 2 fail on a fresh database with a duplicate column, and only for new installs.
 
 /// Schema version this build expects. Stored in SQLite's `user_version`.
-const SCHEMA_VERSION: i32 = 4;
+const SCHEMA_VERSION: i32 = 5;
 
 /// How long SQLite waits for a lock before returning SQLITE_BUSY.
 const BUSY_TIMEOUT_MS: i32 = 5_000;
@@ -83,6 +83,13 @@ pub fn migrate(conn: &Connection) -> Result<(), Error> {
         info!("Applying schema migration 4: rooms have to be activated");
         migrate_to_v4(conn)?;
         version = 4;
+        conn.pragma_update(None, "user_version", version)?;
+    }
+
+    if version < 5 {
+        info!("Applying schema migration 5: video counters");
+        migrate_to_v5(conn)?;
+        version = 5;
         conn.pragma_update(None, "user_version", version)?;
     }
 
@@ -241,6 +248,19 @@ fn migrate_to_v4(conn: &Connection) -> Result<(), Error> {
             SELECT room_id, 0 FROM user_room_data
              UNION
             SELECT room_id, 0 FROM emoji;
+        ",
+    )
+}
+
+/// Counters for videos, which are paid by the clip and by their length.
+///
+/// Purely additive: an `activity` row that is already counting a period keeps its messages
+/// and images and starts at zero videos.
+fn migrate_to_v5(conn: &Connection) -> Result<(), Error> {
+    conn.execute_batch(
+        "
+        ALTER TABLE activity ADD COLUMN videos INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE activity ADD COLUMN video_seconds INTEGER NOT NULL DEFAULT 0;
         ",
     )
 }
@@ -494,6 +514,42 @@ mod tests {
             ]
         );
         assert!(!crate::data::room::is_room_active(&conn, "!scored").unwrap());
+    }
+
+    /// A period that is already being counted must survive the upgrade; the new columns
+    /// start at zero rather than discarding what is there.
+    #[test]
+    fn migration_keeps_a_running_period_and_adds_the_video_columns() {
+        // The `activity` table as migration 3 left it, in a database mid-period.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE user (id INTEGER PRIMARY KEY, name TEXT NOT NULL, url TEXT NOT NULL, user_type INTEGER NOT NULL);
+            CREATE TABLE user_room_data (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, room_id TEXT NOT NULL, social_credit INTEGER NOT NULL);
+            CREATE TABLE activity (
+                user_room_data_id INTEGER PRIMARY KEY REFERENCES user_room_data(id) ON DELETE CASCADE,
+                messages INTEGER NOT NULL DEFAULT 0,
+                images INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT INTO user (id, name, url, user_type) VALUES (1,'alice','example.org',0);
+            INSERT INTO user_room_data (id, user_id, room_id, social_credit) VALUES (10,1,'!r',250);
+            INSERT INTO activity (user_room_data_id, messages, images) VALUES (10, 7, 2);
+            ",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 4).unwrap();
+
+        migrate(&conn).unwrap();
+
+        let (messages, images, videos, seconds): (i32, i32, i32, i32) = conn
+            .query_row(
+                "SELECT messages, images, videos, video_seconds FROM activity",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!((messages, images), (7, 2), "the period must not be lost");
+        assert_eq!((videos, seconds), (0, 0));
     }
 
     #[test]

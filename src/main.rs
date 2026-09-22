@@ -69,6 +69,15 @@ const DEFAULT_POINTS_PER_MESSAGE: i32 = 1;
 /// Social credit awarded per image in the weekly activity payout.
 const DEFAULT_POINTS_PER_IMAGE: i32 = 5;
 
+/// Social credit awarded for a video, whatever its length.
+const DEFAULT_POINTS_PER_VIDEO: i32 = 3;
+
+/// Awarded on top of that for every full ten seconds of video.
+const DEFAULT_POINTS_PER_VIDEO_10_SECONDS: i32 = 1;
+
+/// The most a single video can be worth, the base points included.
+const DEFAULT_VIDEO_MAX_POINTS: i32 = 25;
+
 /// When the weekly activity payout happens.
 const DEFAULT_PAYOUT_DAY: &str = "sunday";
 const DEFAULT_PAYOUT_TIME: &str = "20:00";
@@ -124,6 +133,12 @@ async fn main() -> anyhow::Result<()> {
             DEFAULT_POINTS_PER_MESSAGE,
         ),
         points_per_image: optional_env_var("ACTIVITY_POINTS_PER_IMAGE", DEFAULT_POINTS_PER_IMAGE),
+        points_per_video: optional_env_var("ACTIVITY_POINTS_PER_VIDEO", DEFAULT_POINTS_PER_VIDEO),
+        points_per_video_10_seconds: optional_env_var(
+            "ACTIVITY_POINTS_PER_VIDEO_10_SECONDS",
+            DEFAULT_POINTS_PER_VIDEO_10_SECONDS,
+        ),
+        video_max_points: optional_env_var("ACTIVITY_VIDEO_MAX_POINTS", DEFAULT_VIDEO_MAX_POINTS),
         inactivity_penalty: optional_env_var(
             "ACTIVITY_INACTIVITY_PENALTY",
             DEFAULT_INACTIVITY_PENALTY,
@@ -190,6 +205,7 @@ async fn main() -> anyhow::Result<()> {
         reaction_timespan,
         reaction_limit,
         payout_config.is_enabled(),
+        payout_config.max_countable_video_seconds(),
     ));
 
     initial_admin_user_setup(&shared_conn, &admin_user_id);
