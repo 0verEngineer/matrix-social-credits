@@ -1,13 +1,13 @@
-use std::sync::{Arc, Mutex};
-use rusqlite::{Connection, Error, params, Params, Statement, ToSql};
-use crate::data::user_reaction::{get_user_reactions, UserReaction};
 use crate::data::user_room_data::UserRoomData;
+use rusqlite::{Connection, Error, Params, Statement, params};
+use std::sync::{Arc, Mutex};
+use tracing::{error, warn};
 
 #[derive(Clone)]
 pub enum UserType {
     Default,
     Moderator,
-    Admin
+    Admin,
 }
 
 #[derive(Clone)]
@@ -16,7 +16,7 @@ pub struct User {
     pub name: String,
     pub url: String,
     pub user_type: UserType,
-    pub room_data: Option<UserRoomData>
+    pub room_data: Option<UserRoomData>,
 }
 
 pub struct HtmlAndTextAnswer {
@@ -24,28 +24,12 @@ pub struct HtmlAndTextAnswer {
     pub html: String,
 }
 
-pub fn create_table_user(conn: &Connection) {
-    conn.execute("CREATE TABLE IF NOT EXISTS user (
-            id INTEGER PRIMARY KEY,
-            name TEXT NOT NULL,
-            url TEXT NOT NULL,
-            user_type INTEGER NOT NULL
-    )", []).expect("Failed to create user table");
-}
-
 pub fn insert_user(conn: &Arc<Mutex<Connection>>, user: &User) -> Result<(), Error> {
     let sql = "INSERT INTO user (name, url, user_type) VALUES (?1, ?2, ?3)";
     let user_type_as_int = get_user_type_as_int(user);
     let connection = conn.lock().unwrap();
 
-    connection.execute(
-        sql,
-        &[
-            &user.name as &dyn ToSql,
-            &user.url as &dyn ToSql,
-            &user_type_as_int as &dyn ToSql
-        ]
-    )?;
+    connection.execute(sql, params![user.name, user.url, user_type_as_int])?;
 
     Ok(())
 }
@@ -55,68 +39,70 @@ pub fn update_user(conn: &Arc<Mutex<Connection>>, user: &User) -> Result<(), Err
     let connection = conn.lock().unwrap();
     let user_type_as_int = get_user_type_as_int(user);
 
-    connection.execute(
-        sql,
-        &[
-            &user_type_as_int as &dyn ToSql,
-            &user.id as &dyn ToSql,
-        ]
-    )?;
+    connection.execute(sql, params![user_type_as_int, user.id])?;
 
     Ok(())
 }
 
 fn get_user_type_as_int(user: &User) -> i32 {
-    let user_type_as_int = match user.user_type {
+    match user.user_type {
         UserType::Default => 0,
         UserType::Moderator => 1,
         UserType::Admin => 2,
-    };
-    user_type_as_int
+    }
 }
 
-pub fn find_user_in_db(
-    conn: &Arc<Mutex<Connection>>,
-    name: &String, url: &String
-) -> Option<User> {
-    let sql = "SELECT * FROM user WHERE name=?1 AND url=?2";
+pub fn find_user_in_db(conn: &Arc<Mutex<Connection>>, name: &String, url: &String) -> Option<User> {
+    let sql = "SELECT id, name, url, user_type FROM user WHERE name=?1 AND url=?2";
     let params = params![name, url];
     match do_get_user_sql(conn, sql, params) {
         Ok(mut users) => {
             if users.len() > 1 {
-                println!("Error: Multiple users found for name: {} and url: {}", name, url);
+                warn!(%name, %url, "Multiple users found for the same name and url");
             }
             users.pop()
-        },
+        }
         Err(e) => {
-            println!("Database error: {}", e);
+            error!(error = %e, "Database error");
             None
-        },
+        }
     }
 }
 
-pub fn find_all_users_with_room_data_in_db(conn: &Arc<Mutex<Connection>>, room_id: &String) -> Option<Vec<User>> {
+/// All users that have room data for `room_id`, except the bot itself.
+///
+/// The bot used to be filtered by the hardcoded name `social-credit-system`, which silently
+/// stopped working as soon as the bot account was called anything else. It is now excluded by
+/// the localpart and server name of its actual user id.
+pub fn find_all_users_with_room_data_in_db(
+    conn: &Arc<Mutex<Connection>>,
+    room_id: &String,
+    own_localpart: &str,
+    own_server_name: &str,
+) -> Option<Vec<User>> {
     let sql = "SELECT user.id, user.name, user.url, user.user_type, user_room_data.id, user_room_data.user_id, user_room_data.room_id, user_room_data.social_credit \
-                        FROM user INNER JOIN user_room_data ON user.id=user_room_data.user_id WHERE user_room_data.room_id=?1 AND user.name NOT LIKE 'social-credit-system'";
-    let params = params![room_id];
+                        FROM user INNER JOIN user_room_data ON user.id=user_room_data.user_id \
+                        WHERE user_room_data.room_id=?1 AND NOT (user.name=?2 AND user.url=?3)";
+    let params = params![room_id, own_localpart, own_server_name];
     let connection = conn.lock().unwrap();
 
-    let mut stmt = match connection.prepare(&sql) {
+    let mut stmt = match connection.prepare(sql) {
         Ok(stmt) => stmt,
         Err(e) => {
-            println!("Database error: {}", e);
+            error!(error = %e, "Database error");
             return None;
         }
     };
 
-    let users = do_get_user_sql_inner(params, &mut stmt, &connection, true);
+    let users = do_get_user_sql_inner(params, &mut stmt, true);
 
-    if users.is_err() {
-        println!("Database error: {}", users.err().unwrap());
-        return None;
+    match users {
+        Ok(users) => Some(users),
+        Err(e) => {
+            error!(error = %e, "Database error");
+            None
+        }
     }
-
-    return Some(users.unwrap());
 }
 
 fn do_get_user_sql<P: Params>(
@@ -125,45 +111,152 @@ fn do_get_user_sql<P: Params>(
     params: P,
 ) -> Result<Vec<User>, Error> {
     let connection = conn.lock().unwrap();
-    let mut stmt = match connection.prepare(&sql) {
+    let mut stmt = match connection.prepare(sql) {
         Ok(stmt) => stmt,
         Err(e) => {
-            println!("Database error: {}", e);
+            error!(error = %e, "Database error");
             return Err(e);
         }
     };
 
-    let users = do_get_user_sql_inner(params, &mut stmt, &connection, false);
-
-    return users;
+    do_get_user_sql_inner(params, &mut stmt, false)
 }
 
-fn do_get_user_sql_inner<P: Params>(params: P, stmt: &mut Statement, conn: &Connection, with_room_data: bool) -> Result<Vec<User>, Error> {
-    let users: Result<Vec<User>, _> = stmt.query_map(params, |row| {
-        Ok(User {
-            id: row.get(0)?,
-            name: row.get(1)?,
-            url: row.get(2)?,
-            user_type: match row.get::<_, i32>(3)? {
-                0 => UserType::Default,
-                1 => UserType::Moderator,
-                2 => UserType::Admin,
-                _ => UserType::Default,
-            },
-            room_data: match with_room_data {
-                true => Some(UserRoomData {
-                    id: row.get(4)?,
-                    user_id: row.get(5)?,
-                    room_id: row.get(6)?,
-                    social_credit: row.get(7)?,
-                    reactions: get_user_reactions(conn, row.get(4)?)
-                        .or_else(|_| -> Result<Vec<UserReaction>, Error> {
-                            Ok(Vec::<UserReaction>::new())
-                        }).unwrap(),
-                }),
-                false => None,
-            },
+fn do_get_user_sql_inner<P: Params>(
+    params: P,
+    stmt: &mut Statement,
+    with_room_data: bool,
+) -> Result<Vec<User>, Error> {
+    let users: Result<Vec<User>, _> = stmt
+        .query_map(params, |row| {
+            Ok(User {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                url: row.get(2)?,
+                user_type: match row.get::<_, i32>(3)? {
+                    0 => UserType::Default,
+                    1 => UserType::Moderator,
+                    2 => UserType::Admin,
+                    _ => UserType::Default,
+                },
+                room_data: match with_room_data {
+                    true => Some(UserRoomData {
+                        id: row.get(4)?,
+                        user_id: row.get(5)?,
+                        room_id: row.get(6)?,
+                        social_credit: row.get(7)?,
+                    }),
+                    false => None,
+                },
+            })
         })
-    }).and_then(|mapped_rows| mapped_rows.collect());
+        .and_then(|mapped_rows| mapped_rows.collect());
     users
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        User, UserType, find_all_users_with_room_data_in_db, find_user_in_db, insert_user,
+        update_user,
+    };
+    use crate::data::user_room_data::{UserRoomData, insert_user_room_data};
+    use crate::test_support::test_db;
+
+    const ROOM: &str = "!room:example.org";
+
+    fn user(name: &str) -> User {
+        User {
+            id: -1,
+            name: name.to_owned(),
+            url: "example.org".to_owned(),
+            user_type: UserType::Default,
+            room_data: None,
+        }
+    }
+
+    #[test]
+    fn inserts_and_finds_a_user() {
+        let db = test_db();
+        insert_user(&db, &user("alice")).unwrap();
+
+        let found = find_user_in_db(&db, &"alice".to_owned(), &"example.org".to_owned()).unwrap();
+
+        assert_eq!(found.name, "alice");
+        assert!(matches!(found.user_type, UserType::Default));
+    }
+
+    #[test]
+    fn promotes_a_user_to_admin() {
+        let db = test_db();
+        insert_user(&db, &user("alice")).unwrap();
+        let mut found =
+            find_user_in_db(&db, &"alice".to_owned(), &"example.org".to_owned()).unwrap();
+
+        found.user_type = UserType::Admin;
+        update_user(&db, &found).unwrap();
+
+        let reloaded =
+            find_user_in_db(&db, &"alice".to_owned(), &"example.org".to_owned()).unwrap();
+        assert!(matches!(reloaded.user_type, UserType::Admin));
+    }
+
+    /// The bot used to be filtered out by the hardcoded name "social-credit-system", which
+    /// stopped working as soon as the account was called something else.
+    #[test]
+    fn the_listing_excludes_the_bot_by_its_own_user_id() {
+        let db = test_db();
+        for name in ["alice", "some-other-bot-name"] {
+            insert_user(&db, &user(name)).unwrap();
+            let stored = find_user_in_db(&db, &name.to_owned(), &"example.org".to_owned()).unwrap();
+            insert_user_room_data(
+                &db,
+                &UserRoomData {
+                    id: -1,
+                    user_id: stored.id,
+                    room_id: ROOM.to_owned(),
+                    social_credit: 250,
+                },
+            )
+            .unwrap();
+        }
+
+        let listed = find_all_users_with_room_data_in_db(
+            &db,
+            &ROOM.to_owned(),
+            "some-other-bot-name",
+            "example.org",
+        )
+        .unwrap();
+
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "alice");
+    }
+
+    #[test]
+    fn the_listing_is_scoped_to_a_room() {
+        let db = test_db();
+        insert_user(&db, &user("alice")).unwrap();
+        let stored = find_user_in_db(&db, &"alice".to_owned(), &"example.org".to_owned()).unwrap();
+        insert_user_room_data(
+            &db,
+            &UserRoomData {
+                id: -1,
+                user_id: stored.id,
+                room_id: ROOM.to_owned(),
+                social_credit: 250,
+            },
+        )
+        .unwrap();
+
+        let listed = find_all_users_with_room_data_in_db(
+            &db,
+            &"!other:example.org".to_owned(),
+            "bot",
+            "example.org",
+        )
+        .unwrap();
+
+        assert!(listed.is_empty());
+    }
 }

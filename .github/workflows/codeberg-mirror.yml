@@ -7,7 +7,9 @@ jobs:
     name: Codeberg Mirror
     runs-on: ubuntu-latest
     steps:
-      - uses: yesolutions/mirror-action@master
+      # Pinned to a commit: this third party action gets the Codeberg token, and @master
+      # would run whatever the upstream repository contains at the time.
+      - uses: yesolutions/mirror-action@662fce0eced8996f64d7fa264d76cddd84827f33 # master as of 2025-08-11
         with:
           REMOTE: 'https://codeberg.org/OverEngineer/matrix-social-credits'
           GIT_USERNAME: 'OverEngineer'
